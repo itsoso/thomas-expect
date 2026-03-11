@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 
 import pytest
@@ -295,7 +296,17 @@ def test_search_keyword_dismisses_home_prompt_and_opens_search_page(tmp_path: Pa
     assert target.read_bytes() == b"PNGDATA"
     assert installer.calls == [("com.smile.gifmaker", True)]
     assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "640", "2538"]
-    assert runner.calls[5]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1186", "223"]
+    assert runner.calls[5]["cmd"] == [
+        "adb",
+        "-s",
+        "deec9116",
+        "shell",
+        "am",
+        "start",
+        "-W",
+        "-n",
+        "com.smile.gifmaker/com.yxcorp.plugin.search.SearchActivity",
+    ]
     assert runner.calls[8]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1010", "223"]
     assert runner.calls[13]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
 
@@ -325,3 +336,99 @@ def test_dump_ui_xml_retries_when_cat_returns_non_xml() -> None:
     assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "shell", "cat", "/sdcard/kuaishou_nav.xml"]
     assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "shell", "uiautomator", "dump", "/sdcard/kuaishou_nav.xml"]
     assert runner.calls[3]["cmd"] == ["adb", "-s", "deec9116", "shell", "cat", "/sdcard/kuaishou_nav.xml"]
+
+
+def test_search_keyword_writes_trace_file_when_trace_dir_is_enabled(tmp_path: Path) -> None:
+    from kuaishou_navigator import KuaishouNavigator
+
+    installer = FakeInstaller()
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(stdout="UI hierchary dumped to: /sdcard/kuaishou_nav.xml\n"),
+            FakeCompletedProcess(stdout=HOME_PAGE_WITH_PROMPT_XML),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout="UI hierchary dumped to: /sdcard/kuaishou_nav.xml\n"),
+            FakeCompletedProcess(stdout=HOME_PAGE_XML),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout="UI hierchary dumped to: /sdcard/kuaishou_nav.xml\n"),
+            FakeCompletedProcess(stdout=SEARCH_PAGE_XML),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=b"PNGDATA"),
+        ]
+    )
+
+    trace_dir = tmp_path / "trace"
+    navigator = KuaishouNavigator(
+        serial="deec9116",
+        installer=installer,
+        runner=runner,
+        sleeper=lambda _seconds: None,
+        trace_dir=trace_dir,
+    )
+
+    navigator.search_keyword(
+        keyword="直播带货",
+        pinyin="zhibodaihuo",
+        destination=tmp_path / "result.png",
+    )
+
+    trace_file = trace_dir / "trace.jsonl"
+    assert trace_file.exists()
+    events = [json.loads(line)["event"] for line in trace_file.read_text().splitlines()]
+    assert "search_keyword.start" in events
+    assert "ui_state" in events
+    assert "search_keyword.submit" in events
+
+
+def test_search_keyword_falls_back_to_home_search_when_activity_launch_is_denied(tmp_path: Path) -> None:
+    from kuaishou_navigator import KuaishouNavigator
+
+    installer = FakeInstaller()
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(stdout="UI hierchary dumped to: /sdcard/kuaishou_nav.xml\n"),
+            FakeCompletedProcess(stdout=HOME_PAGE_XML),
+            FakeCompletedProcess(returncode=255, stderr="SecurityException"),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout="UI hierchary dumped to: /sdcard/kuaishou_nav.xml\n"),
+            FakeCompletedProcess(stdout=SEARCH_PAGE_XML),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=b"PNGDATA"),
+        ]
+    )
+
+    navigator = KuaishouNavigator(
+        serial="deec9116",
+        installer=installer,
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    written = navigator.search_keyword(
+        keyword="直播带货",
+        pinyin="zhibodaihuo",
+        destination=tmp_path / "result.png",
+    )
+
+    assert written == tmp_path / "result.png"
+    assert installer.calls == [("com.smile.gifmaker", True)]
+    assert runner.calls[2]["cmd"] == [
+        "adb",
+        "-s",
+        "deec9116",
+        "shell",
+        "am",
+        "start",
+        "-W",
+        "-n",
+        "com.smile.gifmaker/com.yxcorp.plugin.search.SearchActivity",
+    ]
+    assert runner.calls[3]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1186", "223"]
