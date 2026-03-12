@@ -269,6 +269,47 @@ def test_capture_screen_retries_when_first_screencap_is_empty(tmp_path: Path) ->
     assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
 
 
+def test_capture_screen_falls_back_to_device_file_when_direct_exec_out_fails(tmp_path: Path) -> None:
+    from kuaishou_navigator import KuaishouNavigator
+
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(returncode=1, stdout=b"", stderr="direct screencap failed"),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=b"PNGDATA"),
+            FakeCompletedProcess(),
+        ]
+    )
+
+    navigator = KuaishouNavigator(
+        serial="deec9116",
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    target = tmp_path / "kuaishou-fallback-shot.png"
+    written = navigator.capture_screen(target)
+
+    assert written == target
+    assert target.read_bytes() == b"PNGDATA"
+    assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
+    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
+    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
+    assert runner.calls[3]["cmd"] == [
+        "adb",
+        "-s",
+        "deec9116",
+        "shell",
+        "screencap",
+        "-p",
+        "/sdcard/kuaishou_capture.png",
+    ]
+    assert runner.calls[4]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "cat", "/sdcard/kuaishou_capture.png"]
+    assert runner.calls[5]["cmd"] == ["adb", "-s", "deec9116", "shell", "rm", "-f", "/sdcard/kuaishou_capture.png"]
+
+
 def test_open_search_raises_when_not_on_home_activity() -> None:
     from kuaishou_navigator import KuaishouNavigator, KuaishouNavigationError
 
@@ -1180,6 +1221,7 @@ def test_enter_first_live_room_taps_first_card_and_captures_screen(tmp_path: Pat
     runner = RecordingRunner(
         [
             FakeCompletedProcess(),
+            FakeCompletedProcess(),
             FakeCompletedProcess(stdout=b"PNGDATA"),
         ]
     )
@@ -1197,8 +1239,9 @@ def test_enter_first_live_room_taps_first_card_and_captures_screen(tmp_path: Pat
     assert written == target
     assert target.read_bytes() == b"PNGDATA"
     assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "420", "960"]
-    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
-    assert runner.calls[1]["text"] is False
+    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "930", "1030"]
+    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
+    assert runner.calls[2]["text"] is False
 
 
 def test_search_and_enter_first_live_room_runs_full_public_live_flow(tmp_path: Path) -> None:

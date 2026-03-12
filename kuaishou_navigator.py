@@ -22,7 +22,9 @@ KUAISHOU_SEARCH_ACTIVITY = "com.smile.gifmaker/com.yxcorp.plugin.search.SearchAc
 KUAISHOU_SEARCH_TAP = (1186, 223)
 KUAISHOU_LIVE_TAB_TAP = (246, 366)
 KUAISHOU_FIRST_LIVE_RESULT_TAP = (420, 960)
+KUAISHOU_LIVE_ENTRY_POPUP_CLOSE_TAP = (930, 1030)
 KUAISHOU_UI_DUMP_PATH = "/sdcard/kuaishou_nav.xml"
+KUAISHOU_CAPTURE_PATH = "/sdcard/kuaishou_capture.png"
 KUAISHOU_EDITOR_ID = "com.smile.gifmaker:id/editor"
 KUAISHOU_SEARCH_RESULT_TEXT_ID = "com.smile.gifmaker:id/search_result_text"
 KUAISHOU_CLEAR_ID = "com.smile.gifmaker:id/clear_layout"
@@ -351,25 +353,55 @@ class KuaishouNavigator:
 
     def capture_screen(self, destination: str | Path) -> Path:
         target = Path(destination)
-        last_error = "Screenshot failed"
         for attempt in range(3):
-            result = self._run("exec-out", "screencap", "-p", text=False)
-            if result.returncode != 0:
-                last_error = self._decode_output(result.stderr) or "Screenshot failed"
-                if attempt == 2:
-                    raise KuaishouNavigationError(last_error)
-                self.sleeper(0.5)
-                continue
-            payload = result.stdout or b""
+            direct_result = self._run(
+                "exec-out",
+                "screencap",
+                "-p",
+                text=False,
+                retries=5,
+                retry_delay_seconds=2.0,
+            )
+            payload = direct_result.stdout or b""
             if isinstance(payload, str):
                 payload = payload.encode()
             if payload:
                 target.write_bytes(payload)
                 return target
-            last_error = "Screenshot returned empty payload"
             if attempt < 2:
                 self.sleeper(0.5)
-        raise KuaishouNavigationError(last_error)
+        return self.capture_screen_via_device_file(destination)
+
+    def capture_screen_via_device_file(self, destination: str | Path) -> Path:
+        target = Path(destination)
+        capture_result = self._run(
+            "shell",
+            "screencap",
+            "-p",
+            KUAISHOU_CAPTURE_PATH,
+            retries=5,
+            retry_delay_seconds=2.0,
+        )
+        if capture_result.returncode != 0:
+            raise KuaishouNavigationError(self._decode_output(capture_result.stderr) or "Fallback screenshot failed")
+        read_result = self._run(
+            "exec-out",
+            "cat",
+            KUAISHOU_CAPTURE_PATH,
+            text=False,
+            retries=5,
+            retry_delay_seconds=2.0,
+        )
+        payload = read_result.stdout or b""
+        if isinstance(payload, str):
+            payload = payload.encode()
+        if read_result.returncode != 0 or not payload:
+            raise KuaishouNavigationError(
+                self._decode_output(read_result.stderr) or "Fallback screenshot read failed"
+            )
+        target.write_bytes(payload)
+        self._run("shell", "rm", "-f", KUAISHOU_CAPTURE_PATH, retries=0)
+        return target
 
     def open_search(self, destination: str | Path) -> Path:
         self.installer.ensure_app(KNOWN_APPS["kuaishou"], launch_after_install=True)
@@ -628,6 +660,9 @@ class KuaishouNavigator:
         self._trace("enter_first_live_room_start", destination=destination)
         self.tap(*KUAISHOU_FIRST_LIVE_RESULT_TAP)
         self.sleeper(3)
+        self._trace("dismiss_live_entry_popup", center=KUAISHOU_LIVE_ENTRY_POPUP_CLOSE_TAP)
+        self.tap(*KUAISHOU_LIVE_ENTRY_POPUP_CLOSE_TAP)
+        self.sleeper(1)
         self._trace("enter_first_live_room_complete", destination=destination)
         return self.capture_screen(destination)
 
