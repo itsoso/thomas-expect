@@ -22,6 +22,8 @@ DOUYIN_FEED_SWIPE_END = (640, 1000)
 DOUYIN_SEARCH_ICON_TAP = (1188, 223)
 DOUYIN_SEARCH_FIELD_TAP = (620, 223)
 DOUYIN_SEARCH_BUTTON_TAP = (1179, 223)
+DOUYIN_LIVE_TAB_TAP = (640, 364)
+DOUYIN_FIRST_LIVE_CARD_TAP = (430, 1310)
 DOUYIN_UI_DUMP_PATH = "/sdcard/douyin_nav.xml"
 DOUYIN_CAPTURE_PATH = "/sdcard/douyin_capture.png"
 DOUYIN_SEARCH_INPUT_ID = "com.ss.android.ugc.aweme:id/et_search_kw"
@@ -37,6 +39,7 @@ UI_DUMP_SUCCESS_MARKERS = (
     "ui hierchary dumped to:",
     "ui hierarchy dumped to:",
 )
+DELETE_TEXT_BATCH_SIZE = 12
 
 
 class DouyinNavigationError(RuntimeError):
@@ -114,6 +117,14 @@ class DouyinNavigator:
             )
             if not self._is_transient_adb_error(last_result) or attempt == retries:
                 return last_result
+            wait_result = self.runner(
+                self._build_command("wait-for-device"),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if wait_result.returncode != 0 and attempt == retries:
+                return wait_result
             self.sleeper(retry_delay_seconds)
         return last_result  # pragma: no cover
 
@@ -273,14 +284,20 @@ class DouyinNavigator:
     def delete_text(self, characters: int) -> None:
         if characters <= 0:
             return
-        result = self._run(
-            "shell",
-            "sh",
-            "-c",
-            f'i=0; while [ "$i" -lt {characters} ]; do input keyevent 67; i=$((i+1)); done',
-        )
-        if result.returncode != 0:
-            raise DouyinNavigationError(self._decode_output(result.stderr) or "Failed to clear existing search text")
+        remaining = characters
+        while remaining > 0:
+            batch_size = min(remaining, DELETE_TEXT_BATCH_SIZE)
+            result = self._run(
+                "shell",
+                "sh",
+                "-c",
+                f'i=0; while [ "$i" -lt {batch_size} ]; do input keyevent 67; i=$((i+1)); done',
+            )
+            if result.returncode != 0:
+                raise DouyinNavigationError(
+                    self._decode_output(result.stderr) or "Failed to clear existing search text"
+                )
+            remaining -= batch_size
 
     def clear_existing_search_text(self, ui_xml: str) -> None:
         current_ui = ui_xml
@@ -294,6 +311,9 @@ class DouyinNavigator:
             self.delete_text(max(len(existing) + 2, 6))
             self.sleeper(0.2)
             current_ui = self.dump_ui_xml()
+
+    def force_clear_search_text(self, characters: int = 32) -> None:
+        self.delete_text(characters)
 
     def input_text_with_adb_keyboard(self, value: str) -> None:
         current_ime = self.get_default_input_method()
@@ -356,12 +376,19 @@ class DouyinNavigator:
     ) -> Path:
         self.tap(*DOUYIN_SEARCH_FIELD_TAP)
         self.sleeper(0.5)
-        ui_xml = self.dump_ui_xml()
-        self.clear_existing_search_text(ui_xml)
+        try:
+            ui_xml = self.dump_ui_xml()
+        except DouyinNavigationError:
+            ui_xml = None
+        if ui_xml is not None:
+            self.clear_existing_search_text(ui_xml)
+        else:
+            self.force_clear_search_text()
+            self.tap(*DOUYIN_SEARCH_FIELD_TAP)
         self.sleeper(0.5)
         self.input_keyword(keyword=keyword, pinyin=pinyin)
         self.sleeper(0.5)
-        search_button = self.maybe_find_node(ui_xml, DOUYIN_SEARCH_BUTTON_ID)
+        search_button = self.maybe_find_node(ui_xml, DOUYIN_SEARCH_BUTTON_ID) if ui_xml is not None else None
         if search_button is not None:
             self.tap_node(search_button)
         else:
@@ -395,6 +422,35 @@ class DouyinNavigator:
             self._open_search_flow()
         return self.search_keyword_on_search_page(keyword=keyword, pinyin=pinyin, destination=destination)
 
+    def open_live_results(self, destination: str | Path) -> Path:
+        self.tap(*DOUYIN_LIVE_TAB_TAP)
+        self.sleeper(2)
+        return self.capture_screen(destination)
+
+    def enter_first_live_room(self, destination: str | Path) -> Path:
+        self.tap(*DOUYIN_FIRST_LIVE_CARD_TAP)
+        self.sleeper(2)
+        return self.capture_screen(destination)
+
+    def search_live_results(
+        self,
+        keyword: str,
+        pinyin: str,
+        destination: str | Path,
+    ) -> Path:
+        self.search_keyword(keyword=keyword, pinyin=pinyin, destination=destination)
+        return self.open_live_results(destination)
+
+    def search_and_enter_first_live_room(
+        self,
+        keyword: str,
+        pinyin: str,
+        destination: str | Path,
+    ) -> Path:
+        self.search_keyword(keyword=keyword, pinyin=pinyin, destination=destination)
+        self.open_live_results(destination)
+        return self.enter_first_live_room(destination)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Open Douyin search and capture a screenshot.")
@@ -402,6 +458,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", default="/tmp/douyin-search.png", help="Destination screenshot path.")
     parser.add_argument("--query", help="Search keyword to submit on Douyin.")
     parser.add_argument("--pinyin", help="Latin input used when ADBKeyBoard is unavailable.")
+    parser.add_argument(
+        "--open-live-results",
+        action="store_true",
+        help="After search, switch to the public livestream results tab and capture it.",
+    )
+    parser.add_argument(
+        "--enter-first-live-room",
+        action="store_true",
+        help="After search, switch to livestream results and enter the first public live room.",
+    )
     return parser
 
 
@@ -411,12 +477,27 @@ def main() -> int:
     if args.query:
         if not args.pinyin:
             raise SystemExit("--query requires --pinyin")
-        output = navigator.search_keyword(
-            keyword=args.query,
-            pinyin=args.pinyin,
-            destination=args.output,
-        )
+        if args.enter_first_live_room:
+            output = navigator.search_and_enter_first_live_room(
+                keyword=args.query,
+                pinyin=args.pinyin,
+                destination=args.output,
+            )
+        elif args.open_live_results:
+            output = navigator.search_live_results(
+                keyword=args.query,
+                pinyin=args.pinyin,
+                destination=args.output,
+            )
+        else:
+            output = navigator.search_keyword(
+                keyword=args.query,
+                pinyin=args.pinyin,
+                destination=args.output,
+            )
     else:
+        if args.open_live_results or args.enter_first_live_room:
+            raise SystemExit("--open-live-results/--enter-first-live-room require --query and --pinyin")
         output = navigator.open_search(args.output)
     print(f"Douyin search screenshot saved to {output}")
     return 0

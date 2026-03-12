@@ -471,3 +471,329 @@ def test_search_keyword_reuses_existing_search_page_without_relaunching_app(tmp_
     assert written == target
     assert target.read_bytes() == b"PNGDATA"
     assert installer.calls == []
+
+
+def test_search_keyword_on_search_page_falls_back_to_coordinate_clear_when_dump_fails(tmp_path: Path) -> None:
+    from douyin_navigator import DouyinNavigationError, DouyinNavigator
+
+    class DumpFailNavigator(DouyinNavigator):
+        def dump_ui_xml(self) -> str:
+            raise DouyinNavigationError("ui dump failed")
+
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=ADB_KEYBOARD_LIST_OUTPUT),
+            FakeCompletedProcess(stdout="com.tencent.wetype/.plugin.hld.WxHldService\n"),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=b"PNGDATA"),
+            FakeCompletedProcess(),
+        ]
+    )
+
+    navigator = DumpFailNavigator(
+        serial="deec9116",
+        installer=FakeInstaller(),
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    target = tmp_path / "douyin-search-coordinate-fallback.png"
+    written = navigator.search_keyword_on_search_page(
+        keyword="直播带货",
+        pinyin="zhibodaihuo",
+        destination=target,
+    )
+
+    assert written == target
+    assert target.read_bytes() == b"PNGDATA"
+    assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "620", "223"]
+    assert runner.calls[1]["cmd"] == [
+        "adb",
+        "-s",
+        "deec9116",
+        "shell",
+        "sh",
+        "-c",
+        'i=0; while [ "$i" -lt 12 ]; do input keyevent 67; i=$((i+1)); done',
+    ]
+    assert runner.calls[2]["cmd"] == [
+        "adb",
+        "-s",
+        "deec9116",
+        "shell",
+        "sh",
+        "-c",
+        'i=0; while [ "$i" -lt 12 ]; do input keyevent 67; i=$((i+1)); done',
+    ]
+    assert runner.calls[3]["cmd"] == [
+        "adb",
+        "-s",
+        "deec9116",
+        "shell",
+        "sh",
+        "-c",
+        'i=0; while [ "$i" -lt 8 ]; do input keyevent 67; i=$((i+1)); done',
+    ]
+    assert runner.calls[4]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "620", "223"]
+    assert runner.calls[5]["cmd"] == ["adb", "-s", "deec9116", "shell", "ime", "list", "-a"]
+    assert runner.calls[6]["cmd"] == ["adb", "-s", "deec9116", "shell", "settings", "get", "secure", "default_input_method"]
+    assert runner.calls[11]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1179", "223"]
+
+
+def test_open_live_results_taps_live_tab_and_captures_screen(tmp_path: Path) -> None:
+    from douyin_navigator import DouyinNavigator
+
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=b"PNGDATA"),
+            FakeCompletedProcess(),
+        ]
+    )
+
+    navigator = DouyinNavigator(
+        serial="deec9116",
+        installer=FakeInstaller(),
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    target = tmp_path / "douyin-live-results.png"
+    written = navigator.open_live_results(target)
+
+    assert written == target
+    assert target.read_bytes() == b"PNGDATA"
+    assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "640", "364"]
+    assert runner.calls[1]["cmd"] == [
+        "adb",
+        "-s",
+        "deec9116",
+        "shell",
+        "screencap",
+        "-p",
+        "/sdcard/douyin_capture.png",
+    ]
+    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "cat", "/sdcard/douyin_capture.png"]
+    assert runner.calls[3]["cmd"] == ["adb", "-s", "deec9116", "shell", "rm", "-f", "/sdcard/douyin_capture.png"]
+
+
+def test_enter_first_live_room_taps_first_card_and_captures_screen(tmp_path: Path) -> None:
+    from douyin_navigator import DouyinNavigator
+
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=b"PNGDATA"),
+            FakeCompletedProcess(),
+        ]
+    )
+
+    navigator = DouyinNavigator(
+        serial="deec9116",
+        installer=FakeInstaller(),
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    target = tmp_path / "douyin-live-room.png"
+    written = navigator.enter_first_live_room(target)
+
+    assert written == target
+    assert target.read_bytes() == b"PNGDATA"
+    assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "430", "1310"]
+    assert runner.calls[1]["cmd"] == [
+        "adb",
+        "-s",
+        "deec9116",
+        "shell",
+        "screencap",
+        "-p",
+        "/sdcard/douyin_capture.png",
+    ]
+    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "cat", "/sdcard/douyin_capture.png"]
+    assert runner.calls[3]["cmd"] == ["adb", "-s", "deec9116", "shell", "rm", "-f", "/sdcard/douyin_capture.png"]
+
+
+def test_search_and_enter_first_live_room_runs_full_public_live_flow(tmp_path: Path) -> None:
+    from douyin_navigator import DouyinNavigator
+
+    class FlowNavigator(DouyinNavigator):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.actions: list[tuple[str, str, str, str]] = []
+
+        def search_keyword(self, keyword: str, pinyin: str, destination: str | Path) -> Path:
+            self.actions.append(("search", keyword, pinyin, str(destination)))
+            target = Path(destination)
+            target.write_bytes(b"SEARCH")
+            return target
+
+        def open_live_results(self, destination: str | Path) -> Path:
+            self.actions.append(("live-results", "", "", str(destination)))
+            target = Path(destination)
+            target.write_bytes(b"LIVE")
+            return target
+
+        def enter_first_live_room(self, destination: str | Path) -> Path:
+            self.actions.append(("enter-live-room", "", "", str(destination)))
+            target = Path(destination)
+            target.write_bytes(b"ROOM")
+            return target
+
+    navigator = FlowNavigator(
+        serial="deec9116",
+        installer=FakeInstaller(),
+        runner=RecordingRunner([]),
+        sleeper=lambda _seconds: None,
+    )
+
+    target = tmp_path / "douyin-live-room-final.png"
+    written = navigator.search_and_enter_first_live_room(
+        keyword="直播带货",
+        pinyin="zhibodaihuo",
+        destination=target,
+    )
+
+    assert written == target
+    assert target.read_bytes() == b"ROOM"
+    assert navigator.actions == [
+        ("search", "直播带货", "zhibodaihuo", str(target)),
+        ("live-results", "", "", str(target)),
+        ("enter-live-room", "", "", str(target)),
+    ]
+
+
+def test_delete_text_waits_for_device_after_transient_adb_restart() -> None:
+    from douyin_navigator import DouyinNavigator
+
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(returncode=1, stderr="* daemon not running; starting now at tcp:5037\n"),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+        ]
+    )
+
+    navigator = DouyinNavigator(
+        serial="deec9116",
+        installer=FakeInstaller(),
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    navigator.delete_text(6)
+
+    assert runner.calls == [
+        {
+            "cmd": [
+                "adb",
+                "-s",
+                "deec9116",
+                "shell",
+                "sh",
+                "-c",
+                'i=0; while [ "$i" -lt 6 ]; do input keyevent 67; i=$((i+1)); done',
+            ],
+            "capture_output": True,
+            "text": True,
+            "check": False,
+        },
+        {
+            "cmd": ["adb", "-s", "deec9116", "wait-for-device"],
+            "capture_output": True,
+            "text": True,
+            "check": False,
+        },
+        {
+            "cmd": [
+                "adb",
+                "-s",
+                "deec9116",
+                "shell",
+                "sh",
+                "-c",
+                'i=0; while [ "$i" -lt 6 ]; do input keyevent 67; i=$((i+1)); done',
+            ],
+            "capture_output": True,
+            "text": True,
+            "check": False,
+        },
+    ]
+
+
+def test_delete_text_splits_large_clear_requests_into_small_batches() -> None:
+    from douyin_navigator import DouyinNavigator
+
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+        ]
+    )
+
+    navigator = DouyinNavigator(
+        serial="deec9116",
+        installer=FakeInstaller(),
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    navigator.delete_text(32)
+
+    assert runner.calls == [
+        {
+            "cmd": [
+                "adb",
+                "-s",
+                "deec9116",
+                "shell",
+                "sh",
+                "-c",
+                'i=0; while [ "$i" -lt 12 ]; do input keyevent 67; i=$((i+1)); done',
+            ],
+            "capture_output": True,
+            "text": True,
+            "check": False,
+        },
+        {
+            "cmd": [
+                "adb",
+                "-s",
+                "deec9116",
+                "shell",
+                "sh",
+                "-c",
+                'i=0; while [ "$i" -lt 12 ]; do input keyevent 67; i=$((i+1)); done',
+            ],
+            "capture_output": True,
+            "text": True,
+            "check": False,
+        },
+        {
+            "cmd": [
+                "adb",
+                "-s",
+                "deec9116",
+                "shell",
+                "sh",
+                "-c",
+                'i=0; while [ "$i" -lt 8 ]; do input keyevent 67; i=$((i+1)); done',
+            ],
+            "capture_output": True,
+            "text": True,
+            "check": False,
+        },
+    ]
