@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -35,6 +36,8 @@ TRANSIENT_ADB_ERRORS = (
     "daemon not running",
     "cannot connect to daemon",
     "adb server didn't ack",
+    "device '",
+    "device offline",
 )
 UI_DUMP_SUCCESS_MARKERS = (
     "ui hierchary dumped to:",
@@ -67,17 +70,41 @@ class DouyinNavigator:
         adb_path: str = "adb",
         runner: Runner | None = None,
         sleeper: Sleeper | None = None,
+        command_timeout_seconds: float = 15.0,
+        trace_dir: str | Path | None = None,
     ) -> None:
         self.serial = serial
         self.adb_path = adb_path
         self.runner = runner or subprocess.run
         self.sleeper = sleeper or time.sleep
+        self.command_timeout_seconds = command_timeout_seconds
+        self.trace_dir = Path(trace_dir) if trace_dir else None
+        if self.trace_dir is not None:
+            self.trace_dir.mkdir(parents=True, exist_ok=True)
+            self.trace_file = self.trace_dir / "trace.jsonl"
+        else:
+            self.trace_file = None
         self.installer = installer or AndroidAppInstaller(
             serial=serial,
             adb_path=adb_path,
             runner=self.runner,
             sleeper=self.sleeper,
         )
+
+    def _trace(self, event: str, **payload: object) -> None:
+        if self.trace_file is None:
+            return
+        sanitized: dict[str, object] = {
+            "ts": round(time.time(), 3),
+            "event": event,
+        }
+        for key, value in payload.items():
+            if isinstance(value, Path):
+                sanitized[key] = str(value)
+            else:
+                sanitized[key] = value
+        with self.trace_file.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(sanitized, ensure_ascii=False) + "\n")
 
     def _build_command(self, *args: str) -> list[str]:
         command = [self.adb_path]
@@ -107,15 +134,66 @@ class DouyinNavigator:
         text: bool = True,
         retries: int = 2,
         retry_delay_seconds: float = 1.0,
+        timeout_seconds: float | None = None,
+        accept_partial_bytes_prefix: bytes | None = None,
     ) -> subprocess.CompletedProcess:
         last_result: subprocess.CompletedProcess | None = None
+        timeout = self.command_timeout_seconds if timeout_seconds is None else timeout_seconds
         for attempt in range(retries + 1):
-            last_result = self.runner(
-                self._build_command(*args),
-                capture_output=True,
+            command = self._build_command(*args)
+            self._trace(
+                "adb_command_start",
+                command=command,
+                attempt=attempt + 1,
+                retries=retries,
+                timeout=timeout,
                 text=text,
-                check=False,
             )
+            try:
+                last_result = self.runner(
+                    command,
+                    capture_output=True,
+                    text=text,
+                    check=False,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired as exc:
+                self._trace(
+                    "adb_command_timeout",
+                    command=command,
+                    attempt=attempt + 1,
+                    timeout=timeout,
+                )
+                stderr = exc.stderr
+                if stderr is None:
+                    stderr = f"Command timed out after {timeout:.1f}s"
+                elif isinstance(stderr, bytes):
+                    stderr = stderr.decode("utf-8", errors="ignore")
+                stdout: str | bytes
+                if exc.stdout is None:
+                    stdout = b"" if not text else ""
+                else:
+                    stdout = exc.stdout
+                last_result = subprocess.CompletedProcess(
+                    command,
+                    returncode=-15,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            self._trace(
+                "adb_command_result",
+                command=command,
+                attempt=attempt + 1,
+                returncode=last_result.returncode,
+                stdout_preview=self._decode_output(last_result.stdout)[:200],
+                stderr_preview=self._decode_output(last_result.stderr)[:200],
+            )
+            if accept_partial_bytes_prefix is not None:
+                payload = last_result.stdout or b""
+                if isinstance(payload, str):
+                    payload = payload.encode()
+                if payload.startswith(accept_partial_bytes_prefix):
+                    return last_result
             if not self._is_transient_adb_error(last_result) or attempt == retries:
                 return last_result
             wait_result = self.runner(
@@ -123,6 +201,15 @@ class DouyinNavigator:
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=timeout,
+            )
+            self._trace(
+                "adb_wait_for_device",
+                command=self._build_command("wait-for-device"),
+                attempt=attempt + 1,
+                returncode=wait_result.returncode,
+                stdout_preview=self._decode_output(wait_result.stdout)[:200],
+                stderr_preview=self._decode_output(wait_result.stderr)[:200],
             )
             if wait_result.returncode != 0 and attempt == retries:
                 return wait_result
@@ -139,23 +226,39 @@ class DouyinNavigator:
     def dump_ui_xml(self) -> str:
         max_attempts = 3
         for attempt in range(max_attempts):
+            self._trace("dump_ui_xml_attempt", attempt=attempt + 1, max_attempts=max_attempts)
             dump_result = self._run("shell", "uiautomator", "dump", DOUYIN_UI_DUMP_PATH, retries=0)
             dump_output = self._decode_output(dump_result.stdout).lower()
             dump_succeeded = any(marker in dump_output for marker in UI_DUMP_SUCCESS_MARKERS)
             if dump_result.returncode != 0 and not dump_succeeded and not self._is_transient_adb_error(dump_result):
                 raise DouyinNavigationError(self._decode_output(dump_result.stderr) or "Failed to dump Douyin UI")
             self.sleeper(0.5)
-            read_result = self._run("shell", "cat", DOUYIN_UI_DUMP_PATH)
+            read_result = self._run(
+                "exec-out",
+                "cat",
+                DOUYIN_UI_DUMP_PATH,
+                text=False,
+                accept_partial_bytes_prefix=b"<?xml",
+            )
             if read_result.returncode != 0:
                 raise DouyinNavigationError(
                     self._decode_output(read_result.stderr) or "Failed to read dumped Douyin UI XML"
                 )
             ui_xml = self._decode_output(read_result.stdout).strip()
             if ui_xml.startswith("<?xml"):
+                self._trace(
+                    "dump_ui_xml_success",
+                    attempt=attempt + 1,
+                    is_search_page=self.is_search_page(ui_xml),
+                    is_permission_prompt=self.is_permission_prompt(ui_xml),
+                    is_ended_live_room=self.is_ended_live_room(ui_xml),
+                    current_search_text=self.current_search_text(ui_xml),
+                )
                 return ui_xml
             if attempt == max_attempts - 1:
                 break
             self.sleeper(0.5)
+        self._trace("dump_ui_xml_failed", max_attempts=max_attempts)
         raise DouyinNavigationError("uiautomator dump did not return XML for Douyin")
 
     def find_node(self, ui_xml: str, resource_id: str) -> UiNode:
@@ -260,11 +363,12 @@ class DouyinNavigator:
             text=False,
             retries=5,
             retry_delay_seconds=2.0,
+            accept_partial_bytes_prefix=b"\x89PNG",
         )
         direct_payload = direct_result.stdout or b""
         if isinstance(direct_payload, str):
             direct_payload = direct_payload.encode()
-        if direct_result.returncode == 0 and direct_payload:
+        if direct_payload.startswith(b"\x89PNG") or (direct_result.returncode == 0 and direct_payload):
             target.write_bytes(direct_payload)
             return target
         return self.capture_screen_via_device_file(destination)
@@ -288,6 +392,7 @@ class DouyinNavigator:
             text=False,
             retries=5,
             retry_delay_seconds=2.0,
+            accept_partial_bytes_prefix=b"\x89PNG",
         )
         payload = read_result.stdout or b""
         if isinstance(payload, str):
@@ -372,18 +477,21 @@ class DouyinNavigator:
     def dismiss_permission_prompt_if_present(self, ui_xml: str) -> bool:
         if not self.is_permission_prompt(ui_xml):
             return False
+        self._trace("permission_prompt_detected")
         for label in ("拒绝", "仅在使用中允许", "本次使用允许"):
             button = self.maybe_find_text_node(ui_xml, label)
             if button is None:
                 continue
             self.tap_node(button)
             self.sleeper(0.5)
+            self._trace("permission_prompt_dismissed", label=label)
             return True
         return False
 
     def dismiss_live_room_if_present(self, ui_xml: str) -> bool:
         if not self.is_ended_live_room(ui_xml):
             return False
+        self._trace("ended_live_room_detected")
         close_button = self.maybe_find_content_desc_node(ui_xml, "关闭")
         if close_button is None:
             close_button = self.maybe_find_text_node(ui_xml, "关闭")
@@ -391,6 +499,7 @@ class DouyinNavigator:
             return False
         self.tap_node(close_button)
         self.sleeper(0.5)
+        self._trace("ended_live_room_dismissed")
         return True
 
     def input_text_with_adb_keyboard(self, value: str) -> None:
@@ -456,6 +565,7 @@ class DouyinNavigator:
         pinyin: str,
         destination: str | Path,
     ) -> Path:
+        self._trace("search_keyword_on_search_page_start", keyword=keyword, pinyin=pinyin, destination=destination)
         self.tap(*DOUYIN_SEARCH_FIELD_TAP)
         self.sleeper(0.5)
         try:
@@ -469,19 +579,22 @@ class DouyinNavigator:
         if ui_xml is not None and self.dismiss_permission_prompt_if_present(ui_xml):
             ui_xml = self.dump_ui_xml()
         if ui_xml is not None and self.is_search_page(ui_xml):
-            self.clear_existing_search_text(ui_xml)
+            if self.current_search_text(ui_xml).strip() != keyword.strip():
+                self.clear_existing_search_text(ui_xml)
         else:
             self.force_clear_search_text()
             self.tap(*DOUYIN_SEARCH_FIELD_TAP)
         self.sleeper(0.5)
-        self.input_keyword(keyword=keyword, pinyin=pinyin)
-        self.sleeper(0.5)
+        if ui_xml is None or not self.is_search_page(ui_xml) or self.current_search_text(ui_xml).strip() != keyword.strip():
+            self.input_keyword(keyword=keyword, pinyin=pinyin)
+            self.sleeper(0.5)
         search_button = self.maybe_find_node(ui_xml, DOUYIN_SEARCH_BUTTON_ID) if ui_xml is not None else None
         if search_button is not None:
             self.tap_node(search_button)
         else:
             self.tap(*DOUYIN_SEARCH_BUTTON_TAP)
         self.sleeper(1)
+        self._trace("search_keyword_on_search_page_submit", keyword=keyword)
         return self.capture_screen(destination)
 
     def search_keyword(
@@ -490,6 +603,7 @@ class DouyinNavigator:
         pinyin: str,
         destination: str | Path,
     ) -> Path:
+        self._trace("search_keyword_start", keyword=keyword, pinyin=pinyin, destination=destination)
         try:
             ui_xml = self.dump_ui_xml()
         except DouyinNavigationError:
@@ -519,17 +633,25 @@ class DouyinNavigator:
                 )
             except DouyinNavigationError:
                 self._open_search_flow()
-        return self.search_keyword_on_search_page(keyword=keyword, pinyin=pinyin, destination=destination)
+        written = self.search_keyword_on_search_page(keyword=keyword, pinyin=pinyin, destination=destination)
+        self._trace("search_keyword_complete", keyword=keyword, destination=destination)
+        return written
 
     def open_live_results(self, destination: str | Path) -> Path:
+        self._trace("open_live_results_start", destination=destination)
         self.tap(*DOUYIN_LIVE_TAB_TAP)
         self.sleeper(2)
-        return self.capture_screen(destination)
+        written = self.capture_screen(destination)
+        self._trace("open_live_results_complete", destination=destination)
+        return written
 
     def enter_first_live_room(self, destination: str | Path) -> Path:
+        self._trace("enter_first_live_room_start", destination=destination)
         self.tap(*DOUYIN_FIRST_LIVE_CARD_TAP)
         self.sleeper(2)
-        return self.capture_screen(destination)
+        written = self.capture_screen(destination)
+        self._trace("enter_first_live_room_complete", destination=destination)
+        return written
 
     def search_live_results(
         self,

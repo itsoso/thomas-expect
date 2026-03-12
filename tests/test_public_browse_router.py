@@ -8,8 +8,9 @@ import pytest
 class FakeDouyinNavigator:
     instances: list["FakeDouyinNavigator"] = []
 
-    def __init__(self, serial: str | None = None, **_kwargs) -> None:
+    def __init__(self, serial: str | None = None, trace_dir: str | Path | None = None, **_kwargs) -> None:
         self.serial = serial
+        self.trace_dir = None if trace_dir is None else str(trace_dir)
         self.calls: list[tuple[str, tuple[object, ...]]] = []
         type(self).instances.append(self)
 
@@ -98,6 +99,7 @@ def test_router_routes_douyin_open_first_result_to_live_room(tmp_path: Path) -> 
     )
 
     target = tmp_path / "douyin-live.png"
+    trace_dir = tmp_path / "trace"
     written = router.execute(
         PublicBrowseRequest(
             platform="douyin",
@@ -106,6 +108,7 @@ def test_router_routes_douyin_open_first_result_to_live_room(tmp_path: Path) -> 
             pinyin="zhibodaihuo",
             output=target,
             serial="device-1",
+            trace_dir=trace_dir,
         )
     )
 
@@ -113,6 +116,7 @@ def test_router_routes_douyin_open_first_result_to_live_room(tmp_path: Path) -> 
     assert target.read_bytes() == b"DOUYIN-LIVE"
     assert len(FakeDouyinNavigator.instances) == 1
     assert FakeDouyinNavigator.instances[0].serial == "device-1"
+    assert FakeDouyinNavigator.instances[0].trace_dir == str(trace_dir)
     assert FakeDouyinNavigator.instances[0].calls == [
         ("search_and_enter_first_live_room", ("直播带货", "zhibodaihuo", str(target)))
     ]

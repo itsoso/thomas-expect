@@ -64,7 +64,7 @@ class PublicBrowseRouter:
         target = Path(request.output)
 
         if request.platform == "douyin":
-            navigator = self.douyin_factory(serial=request.serial)
+            navigator = self.douyin_factory(serial=request.serial, trace_dir=request.trace_dir)
             if request.action == "open-search":
                 return navigator.open_search(target)
             if request.action == "search":

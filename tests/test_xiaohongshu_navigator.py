@@ -329,6 +329,7 @@ def test_capture_screen_accepts_valid_png_when_adb_returns_negative_15(tmp_path:
             "capture_output": True,
             "text": False,
             "check": False,
+            "timeout": None,
         }
     ]
 

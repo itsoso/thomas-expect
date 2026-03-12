@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,18 +17,29 @@ class RecordingRunner:
         self.responses = list(responses)
         self.calls: list[dict[str, object]] = []
 
-    def __call__(self, cmd: list[str], capture_output: bool = True, text: bool = True, check: bool = False):
+    def __call__(
+        self,
+        cmd: list[str],
+        capture_output: bool = True,
+        text: bool = True,
+        check: bool = False,
+        timeout: float | None = None,
+    ):
         self.calls.append(
             {
                 "cmd": cmd,
                 "capture_output": capture_output,
                 "text": text,
                 "check": check,
+                "timeout": timeout,
             }
         )
         if not self.responses:
             raise AssertionError(f"Missing fake response for command: {cmd}")
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 class FakeInstaller:
@@ -206,7 +218,8 @@ def test_open_search_launches_douyin_and_captures_search_page(tmp_path: Path) ->
     assert target.read_bytes() == b"PNGDATA"
     assert installer.calls == [("com.ss.android.ugc.aweme", True)]
     assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "shell", "uiautomator", "dump", "/sdcard/douyin_nav.xml"]
-    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "shell", "cat", "/sdcard/douyin_nav.xml"]
+    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "cat", "/sdcard/douyin_nav.xml"]
+    assert runner.calls[1]["text"] is False
     assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "640", "2000"]
     assert runner.calls[3]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "swipe", "640", "2300", "640", "1000", "250"]
     assert runner.calls[4]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "swipe", "640", "2300", "640", "1000", "250"]
@@ -285,6 +298,98 @@ def test_capture_screen_falls_back_to_device_file_when_direct_exec_out_fails(tmp
     ]
     assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "cat", "/sdcard/douyin_capture.png"]
     assert runner.calls[3]["cmd"] == ["adb", "-s", "deec9116", "shell", "rm", "-f", "/sdcard/douyin_capture.png"]
+
+
+def test_capture_screen_retries_after_timeout_then_succeeds_directly(tmp_path: Path) -> None:
+    from douyin_navigator import DouyinNavigator
+
+    runner = RecordingRunner(
+        [
+            subprocess.TimeoutExpired(cmd=["adb", "exec-out", "screencap", "-p"], timeout=15),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=b"PNGDATA"),
+        ]
+    )
+
+    navigator = DouyinNavigator(
+        serial="deec9116",
+        installer=FakeInstaller(),
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    target = tmp_path / "douyin-timeout-retry-shot.png"
+    written = navigator.capture_screen(target)
+
+    assert written == target
+    assert target.read_bytes() == b"PNGDATA"
+    assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
+    assert runner.calls[0]["timeout"] == 15.0
+    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "wait-for-device"]
+    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
+
+
+def test_capture_screen_accepts_valid_png_when_adb_returns_negative_15(tmp_path: Path) -> None:
+    from douyin_navigator import DouyinNavigator
+
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(returncode=-15, stdout=b"\x89PNGDATA"),
+        ]
+    )
+
+    navigator = DouyinNavigator(
+        serial="deec9116",
+        installer=FakeInstaller(),
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    target = tmp_path / "douyin-negative-15-valid-png.png"
+    written = navigator.capture_screen(target)
+
+    assert written == target
+    assert target.read_bytes() == b"\x89PNGDATA"
+    assert runner.calls == [
+        {
+            "cmd": ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"],
+            "capture_output": True,
+            "text": False,
+            "check": False,
+            "timeout": 15.0,
+        }
+    ]
+
+
+def test_dump_ui_xml_retries_after_exec_out_cat_timeout() -> None:
+    from douyin_navigator import DouyinNavigator
+
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(stdout="UI hierchary dumped to: /sdcard/douyin_nav.xml\n"),
+            subprocess.TimeoutExpired(cmd=["adb", "exec-out", "cat", "/sdcard/douyin_nav.xml"], timeout=15),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=b"<?xml version='1.0' encoding='UTF-8'?><hierarchy />"),
+        ]
+    )
+
+    navigator = DouyinNavigator(
+        serial="deec9116",
+        installer=FakeInstaller(),
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    ui_xml = navigator.dump_ui_xml()
+
+    assert ui_xml.startswith("<?xml")
+    assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "shell", "uiautomator", "dump", "/sdcard/douyin_nav.xml"]
+    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "cat", "/sdcard/douyin_nav.xml"]
+    assert runner.calls[1]["text"] is False
+    assert runner.calls[1]["timeout"] == 15.0
+    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "wait-for-device"]
+    assert runner.calls[3]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "cat", "/sdcard/douyin_nav.xml"]
+    assert runner.calls[3]["text"] is False
 
 
 def test_clear_existing_search_text_retries_until_the_input_is_empty() -> None:
@@ -386,7 +491,8 @@ def test_search_keyword_on_search_page_prefers_adb_keyboard_and_replaces_existin
     assert installer.calls == []
     assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "620", "223"]
     assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "shell", "uiautomator", "dump", "/sdcard/douyin_nav.xml"]
-    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "shell", "cat", "/sdcard/douyin_nav.xml"]
+    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "cat", "/sdcard/douyin_nav.xml"]
+    assert runner.calls[2]["text"] is False
     assert runner.calls[3]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "617", "223"]
     assert runner.calls[4]["cmd"] == [
         "adb",
@@ -398,7 +504,8 @@ def test_search_keyword_on_search_page_prefers_adb_keyboard_and_replaces_existin
         'i=0; while [ "$i" -lt 6 ]; do input keyevent 67; i=$((i+1)); done',
     ]
     assert runner.calls[5]["cmd"] == ["adb", "-s", "deec9116", "shell", "uiautomator", "dump", "/sdcard/douyin_nav.xml"]
-    assert runner.calls[6]["cmd"] == ["adb", "-s", "deec9116", "shell", "cat", "/sdcard/douyin_nav.xml"]
+    assert runner.calls[6]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "cat", "/sdcard/douyin_nav.xml"]
+    assert runner.calls[6]["text"] is False
     assert runner.calls[7]["cmd"] == ["adb", "-s", "deec9116", "shell", "ime", "list", "-a"]
     assert runner.calls[8]["cmd"] == ["adb", "-s", "deec9116", "shell", "settings", "get", "secure", "default_input_method"]
     assert runner.calls[9]["cmd"] == ["adb", "-s", "deec9116", "shell", "ime", "enable", ADB_KEYBOARD_IME]
@@ -425,6 +532,44 @@ def test_search_keyword_on_search_page_prefers_adb_keyboard_and_replaces_existin
     assert runner.calls[13]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1179", "223"]
     assert runner.calls[14]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
     assert runner.calls[14]["text"] is False
+
+
+def test_search_keyword_on_search_page_skips_retyping_when_keyword_already_matches(tmp_path: Path) -> None:
+    from douyin_navigator import DouyinNavigator
+
+    current_keyword_xml = build_search_page_xml("美女直播")
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=current_keyword_xml),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=b"PNGDATA"),
+        ]
+    )
+
+    navigator = DouyinNavigator(
+        serial="deec9116",
+        installer=FakeInstaller(),
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    target = tmp_path / "douyin-search-already-matched.png"
+    written = navigator.search_keyword_on_search_page(
+        keyword="美女直播",
+        pinyin="meinvzhibo",
+        destination=target,
+    )
+
+    assert written == target
+    assert target.read_bytes() == b"PNGDATA"
+    assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "620", "223"]
+    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "shell", "uiautomator", "dump", "/sdcard/douyin_nav.xml"]
+    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "cat", "/sdcard/douyin_nav.xml"]
+    assert runner.calls[3]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1179", "223"]
+    assert runner.calls[4]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
+    assert len(runner.calls) == 5
 
 
 def test_search_keyword_on_search_page_falls_back_to_pinyin_when_adb_keyboard_switch_fails(tmp_path: Path) -> None:
@@ -930,12 +1075,14 @@ def test_delete_text_waits_for_device_after_transient_adb_restart() -> None:
             "capture_output": True,
             "text": True,
             "check": False,
+            "timeout": 15.0,
         },
         {
             "cmd": ["adb", "-s", "deec9116", "wait-for-device"],
             "capture_output": True,
             "text": True,
             "check": False,
+            "timeout": 15.0,
         },
         {
             "cmd": [
@@ -950,7 +1097,49 @@ def test_delete_text_waits_for_device_after_transient_adb_restart() -> None:
             "capture_output": True,
             "text": True,
             "check": False,
+            "timeout": 15.0,
         },
+    ]
+
+
+def test_delete_text_waits_for_device_after_device_not_found() -> None:
+    from douyin_navigator import DouyinNavigator
+
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(returncode=1, stderr="adb: device 'deec9116' not found"),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+        ]
+    )
+
+    navigator = DouyinNavigator(
+        serial="deec9116",
+        installer=FakeInstaller(),
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    navigator.delete_text(6)
+
+    assert runner.calls[0]["cmd"] == [
+        "adb",
+        "-s",
+        "deec9116",
+        "shell",
+        "sh",
+        "-c",
+        'i=0; while [ "$i" -lt 6 ]; do input keyevent 67; i=$((i+1)); done',
+    ]
+    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "wait-for-device"]
+    assert runner.calls[2]["cmd"] == [
+        "adb",
+        "-s",
+        "deec9116",
+        "shell",
+        "sh",
+        "-c",
+        'i=0; while [ "$i" -lt 6 ]; do input keyevent 67; i=$((i+1)); done',
     ]
 
 
@@ -988,6 +1177,7 @@ def test_delete_text_splits_large_clear_requests_into_small_batches() -> None:
             "capture_output": True,
             "text": True,
             "check": False,
+            "timeout": 15.0,
         },
         {
             "cmd": [
@@ -1002,6 +1192,7 @@ def test_delete_text_splits_large_clear_requests_into_small_batches() -> None:
             "capture_output": True,
             "text": True,
             "check": False,
+            "timeout": 15.0,
         },
         {
             "cmd": [
@@ -1016,5 +1207,6 @@ def test_delete_text_splits_large_clear_requests_into_small_batches() -> None:
             "capture_output": True,
             "text": True,
             "check": False,
+            "timeout": 15.0,
         },
     ]
