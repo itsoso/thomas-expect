@@ -28,6 +28,7 @@ DOUYIN_UI_DUMP_PATH = "/sdcard/douyin_nav.xml"
 DOUYIN_CAPTURE_PATH = "/sdcard/douyin_capture.png"
 DOUYIN_SEARCH_INPUT_ID = "com.ss.android.ugc.aweme:id/et_search_kw"
 DOUYIN_SEARCH_BUTTON_ID = "com.ss.android.ugc.aweme:id/4_s"
+ANDROID_PERMISSION_CONTROLLER_PACKAGE = "com.android.permissioncontroller"
 ADB_KEYBOARD_IME = "com.android.adbkeyboard/.AdbIME"
 ADB_KEYBOARD_B64_ACTION = "ADB_INPUT_B64"
 TRANSIENT_ADB_ERRORS = (
@@ -178,11 +179,49 @@ class DouyinNavigator:
         except DouyinNavigationError:
             return None
 
+    def maybe_find_text_node(self, ui_xml: str, text: str) -> UiNode | None:
+        root = ET.fromstring(ui_xml)
+        for node in root.iter("node"):
+            if node.attrib.get("text") != text:
+                continue
+            bounds = node.attrib.get("bounds")
+            if not bounds:
+                continue
+            return UiNode(
+                resource_id=node.attrib.get("resource-id", ""),
+                text=text,
+                bounds=self._parse_bounds(bounds),
+            )
+        return None
+
+    def maybe_find_content_desc_node(self, ui_xml: str, content_desc: str) -> UiNode | None:
+        root = ET.fromstring(ui_xml)
+        for node in root.iter("node"):
+            if node.attrib.get("content-desc") != content_desc:
+                continue
+            bounds = node.attrib.get("bounds")
+            if not bounds:
+                continue
+            return UiNode(
+                resource_id=node.attrib.get("resource-id", ""),
+                text=node.attrib.get("text", ""),
+                bounds=self._parse_bounds(bounds),
+            )
+        return None
+
     def is_search_page(self, ui_xml: str) -> bool:
         return (
             self.maybe_find_node(ui_xml, DOUYIN_SEARCH_INPUT_ID) is not None
             and self.maybe_find_node(ui_xml, DOUYIN_SEARCH_BUTTON_ID) is not None
         )
+
+    def is_permission_prompt(self, ui_xml: str) -> bool:
+        return ANDROID_PERMISSION_CONTROLLER_PACKAGE in ui_xml and (
+            "拒绝" in ui_xml or "仅在使用中允许" in ui_xml or "本次使用允许" in ui_xml
+        )
+
+    def is_ended_live_room(self, ui_xml: str) -> bool:
+        return "直播已结束" in ui_xml and "关闭" in ui_xml
 
     def current_search_text(self, ui_xml: str) -> str:
         search_input = self.maybe_find_node(ui_xml, DOUYIN_SEARCH_INPUT_ID)
@@ -213,6 +252,21 @@ class DouyinNavigator:
             raise DouyinNavigationError(self._decode_output(result.stderr) or "Failed to swipe Douyin feed")
 
     def capture_screen(self, destination: str | Path) -> Path:
+        target = Path(destination)
+        direct_result = self._run(
+            "exec-out",
+            "screencap",
+            "-p",
+            text=False,
+            retries=5,
+            retry_delay_seconds=2.0,
+        )
+        direct_payload = direct_result.stdout or b""
+        if isinstance(direct_payload, str):
+            direct_payload = direct_payload.encode()
+        if direct_result.returncode == 0 and direct_payload:
+            target.write_bytes(direct_payload)
+            return target
         return self.capture_screen_via_device_file(destination)
 
     def capture_screen_via_device_file(self, destination: str | Path) -> Path:
@@ -315,6 +369,30 @@ class DouyinNavigator:
     def force_clear_search_text(self, characters: int = 32) -> None:
         self.delete_text(characters)
 
+    def dismiss_permission_prompt_if_present(self, ui_xml: str) -> bool:
+        if not self.is_permission_prompt(ui_xml):
+            return False
+        for label in ("拒绝", "仅在使用中允许", "本次使用允许"):
+            button = self.maybe_find_text_node(ui_xml, label)
+            if button is None:
+                continue
+            self.tap_node(button)
+            self.sleeper(0.5)
+            return True
+        return False
+
+    def dismiss_live_room_if_present(self, ui_xml: str) -> bool:
+        if not self.is_ended_live_room(ui_xml):
+            return False
+        close_button = self.maybe_find_content_desc_node(ui_xml, "关闭")
+        if close_button is None:
+            close_button = self.maybe_find_text_node(ui_xml, "关闭")
+        if close_button is None:
+            return False
+        self.tap_node(close_button)
+        self.sleeper(0.5)
+        return True
+
     def input_text_with_adb_keyboard(self, value: str) -> None:
         current_ime = self.get_default_input_method()
         restore_ime = current_ime if current_ime and current_ime != ADB_KEYBOARD_IME else None
@@ -355,6 +433,10 @@ class DouyinNavigator:
     def _open_search_flow(self) -> None:
         self.installer.ensure_app(KNOWN_APPS["douyin"], launch_after_install=True)
         self.sleeper(2)
+        try:
+            self.dismiss_permission_prompt_if_present(self.dump_ui_xml())
+        except DouyinNavigationError:
+            pass
         self.tap(*DOUYIN_PRIVACY_CONSENT_TAP)
         self.sleeper(1)
         self.swipe(DOUYIN_FEED_SWIPE_START, DOUYIN_FEED_SWIPE_END, 250)
@@ -380,7 +462,13 @@ class DouyinNavigator:
             ui_xml = self.dump_ui_xml()
         except DouyinNavigationError:
             ui_xml = None
-        if ui_xml is not None:
+        if ui_xml is not None and self.dismiss_live_room_if_present(ui_xml):
+            self.tap(*DOUYIN_SEARCH_FIELD_TAP)
+            self.sleeper(0.5)
+            ui_xml = self.dump_ui_xml()
+        if ui_xml is not None and self.dismiss_permission_prompt_if_present(ui_xml):
+            ui_xml = self.dump_ui_xml()
+        if ui_xml is not None and self.is_search_page(ui_xml):
             self.clear_existing_search_text(ui_xml)
         else:
             self.force_clear_search_text()
@@ -418,8 +506,19 @@ class DouyinNavigator:
                     pinyin=pinyin,
                     destination=destination,
                 )
+        if self.dismiss_live_room_if_present(ui_xml):
+            ui_xml = self.dump_ui_xml()
+        if self.dismiss_permission_prompt_if_present(ui_xml):
+            ui_xml = self.dump_ui_xml()
         if not self.is_search_page(ui_xml):
-            self._open_search_flow()
+            try:
+                return self.search_keyword_on_search_page(
+                    keyword=keyword,
+                    pinyin=pinyin,
+                    destination=destination,
+                )
+            except DouyinNavigationError:
+                self._open_search_flow()
         return self.search_keyword_on_search_page(keyword=keyword, pinyin=pinyin, destination=destination)
 
     def open_live_results(self, destination: str | Path) -> Path:

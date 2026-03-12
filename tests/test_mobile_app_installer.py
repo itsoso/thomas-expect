@@ -232,3 +232,76 @@ def test_ensure_connected_retries_once_when_adb_daemon_is_bootstrapping() -> Non
         ["adb", "-s", "deec9116", "get-state"],
         ["adb", "-s", "deec9116", "get-state"],
     ]
+
+
+def test_ensure_app_falls_back_to_resolved_launcher_when_monkey_launch_fails() -> None:
+    from mobile_app_installer import AndroidAppInstaller, AppSpec
+
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(stdout="device\n"),
+            FakeCompletedProcess(returncode=0, stdout="package:/data/app/base.apk\n"),
+            FakeCompletedProcess(returncode=1, stderr="monkey launch failed"),
+            FakeCompletedProcess(
+                returncode=0,
+                stdout=(
+                    "priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true\n"
+                    "com.ss.android.ugc.aweme/.splash.SplashActivity\n"
+                ),
+            ),
+            FakeCompletedProcess(returncode=0, stdout="Starting: Intent"),
+        ]
+    )
+
+    installer = AndroidAppInstaller(runner=runner)
+    result = installer.ensure_app(AppSpec(name="抖音", package_name="com.ss.android.ugc.aweme"))
+
+    assert result.status == "already-installed"
+    assert result.package_name == "com.ss.android.ugc.aweme"
+    assert runner.calls == [
+        ["adb", "get-state"],
+        ["adb", "shell", "pm", "path", "com.ss.android.ugc.aweme"],
+        [
+            "adb",
+            "shell",
+            "monkey",
+            "-p",
+            "com.ss.android.ugc.aweme",
+            "-c",
+            "android.intent.category.LAUNCHER",
+            "1",
+        ],
+        [
+            "adb",
+            "shell",
+            "cmd",
+            "package",
+            "resolve-activity",
+            "--brief",
+            "com.ss.android.ugc.aweme",
+        ],
+        [
+            "adb",
+            "shell",
+            "am",
+            "start",
+            "-W",
+            "-n",
+            "com.ss.android.ugc.aweme/.splash.SplashActivity",
+        ],
+    ]
+
+
+def test_parse_resolved_launcher_activity_uses_last_component_line() -> None:
+    from mobile_app_installer import AndroidAppInstaller
+
+    installer = AndroidAppInstaller()
+
+    resolved_activity = installer._parse_resolved_launcher_activity(
+        (
+            "priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true\n"
+            "com.ss.android.ugc.aweme/.LauncherActivity\n"
+        )
+    )
+
+    assert resolved_activity == "com.ss.android.ugc.aweme/.LauncherActivity"

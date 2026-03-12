@@ -120,21 +120,45 @@ class AndroidAppInstaller:
         result = self._run("shell", "pm", "path", package_name)
         return result.returncode == 0 and "package:" in (result.stdout or "")
 
+    @staticmethod
+    def _parse_resolved_launcher_activity(output: str) -> str | None:
+        for line in reversed(output.splitlines()):
+            candidate = line.strip()
+            if "/" not in candidate:
+                continue
+            return candidate
+        return None
+
+    def resolve_launcher_activity(self, package_name: str) -> str | None:
+        result = self._run("shell", "cmd", "package", "resolve-activity", "--brief", package_name)
+        if result.returncode != 0:
+            return None
+        return self._parse_resolved_launcher_activity(result.stdout or "")
+
     def launch_app(self, package_name: str, launcher_activity: str | None = None) -> None:
         if launcher_activity:
             result = self._run("shell", "am", "start", "-W", "-n", launcher_activity)
-        else:
-            result = self._run(
-                "shell",
-                "monkey",
-                "-p",
-                package_name,
-                "-c",
-                "android.intent.category.LAUNCHER",
-                "1",
-            )
-        if result.returncode != 0:
-            raise AppInstallError(result.stderr or f"Failed to launch {package_name}")
+            if result.returncode != 0:
+                raise AppInstallError(result.stderr or f"Failed to launch {package_name}")
+            return
+        result = self._run(
+            "shell",
+            "monkey",
+            "-p",
+            package_name,
+            "-c",
+            "android.intent.category.LAUNCHER",
+            "1",
+        )
+        if result.returncode == 0:
+            return
+        resolved_activity = self.resolve_launcher_activity(package_name)
+        if resolved_activity:
+            fallback_result = self._run("shell", "am", "start", "-W", "-n", resolved_activity)
+            if fallback_result.returncode == 0:
+                return
+            raise AppInstallError(fallback_result.stderr or f"Failed to launch {package_name}")
+        raise AppInstallError(result.stderr or f"Failed to launch {package_name}")
 
     def tap(self, x: int, y: int) -> None:
         result = self._run("shell", "input", "tap", str(x), str(y))
