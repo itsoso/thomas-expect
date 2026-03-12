@@ -34,7 +34,7 @@ class IncrementingClock:
         return current
 
 
-def test_ensure_app_when_already_installed_only_launches_and_verifies() -> None:
+def test_ensure_app_when_already_installed_only_launches_once() -> None:
     from mobile_app_installer import AndroidAppInstaller, AppSpec
 
     runner = RecordingRunner(
@@ -42,7 +42,6 @@ def test_ensure_app_when_already_installed_only_launches_and_verifies() -> None:
             FakeCompletedProcess(stdout="device\n"),
             FakeCompletedProcess(returncode=0, stdout="package:/data/app/base.apk\n"),
             FakeCompletedProcess(returncode=0, stdout="Events injected: 1\n"),
-            FakeCompletedProcess(returncode=0, stdout="package:/data/app/base.apk\n"),
         ]
     )
 
@@ -64,7 +63,42 @@ def test_ensure_app_when_already_installed_only_launches_and_verifies() -> None:
             "android.intent.category.LAUNCHER",
             "1",
         ],
-        ["adb", "shell", "pm", "path", "com.eg.android.AlipayGphone"],
+    ]
+
+
+def test_ensure_app_uses_explicit_launcher_activity_when_provided() -> None:
+    from mobile_app_installer import AndroidAppInstaller, AppSpec
+
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(stdout="device\n"),
+            FakeCompletedProcess(returncode=0, stdout="package:/data/app/base.apk\n"),
+            FakeCompletedProcess(returncode=0, stdout="Starting: Intent"),
+        ]
+    )
+
+    installer = AndroidAppInstaller(runner=runner)
+    result = installer.ensure_app(
+        AppSpec(
+            name="快手",
+            package_name="com.smile.gifmaker",
+            launcher_activity="com.smile.gifmaker/com.yxcorp.gifshow.HomeActivity",
+        )
+    )
+
+    assert result.status == "already-installed"
+    assert runner.calls == [
+        ["adb", "get-state"],
+        ["adb", "shell", "pm", "path", "com.smile.gifmaker"],
+        [
+            "adb",
+            "shell",
+            "am",
+            "start",
+            "-W",
+            "-n",
+            "com.smile.gifmaker/com.yxcorp.gifshow.HomeActivity",
+        ],
     ]
 
 

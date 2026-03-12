@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -18,17 +19,27 @@ Sleeper = Callable[[float], None]
 
 KUAISHOU_HOME_ACTIVITY = "com.smile.gifmaker/com.yxcorp.gifshow.HomeActivity"
 KUAISHOU_SEARCH_ACTIVITY = "com.smile.gifmaker/com.yxcorp.plugin.search.SearchActivity"
-KUAISHOU_SEARCH_TAP = (1188, 212)
+KUAISHOU_SEARCH_TAP = (1186, 223)
 KUAISHOU_UI_DUMP_PATH = "/sdcard/kuaishou_nav.xml"
 KUAISHOU_EDITOR_ID = "com.smile.gifmaker:id/editor"
+KUAISHOU_SEARCH_RESULT_TEXT_ID = "com.smile.gifmaker:id/search_result_text"
 KUAISHOU_CLEAR_ID = "com.smile.gifmaker:id/clear_layout"
 KUAISHOU_SEARCH_BUTTON_ID = "com.smile.gifmaker:id/right_tv"
 KUAISHOU_HOME_SEARCH_BUTTON_ID = "com.smile.gifmaker:id/search_btn"
 KUAISHOU_TEEN_MODE_DISMISS_ID = "com.smile.gifmaker:id/positive"
+KUAISHOU_SEARCH_GROUP_WEBVIEW_ID = "com.smile.gifmaker:id/search_web_view"
+KUAISHOU_SEARCH_GROUP_BACK_ID = "com.smile.gifmaker:id/left_btn"
+KUAISHOU_SEARCH_RESULTS_ROOT_ID = "com.smile.gifmaker:id/search_result_view"
+KUAISHOU_SEARCH_RESULTS_TAB_ID = "com.smile.gifmaker:id/tab_container"
+KUAISHOU_SEARCH_RESULTS_VIEW_PAGER_ID = "com.smile.gifmaker:id/view_pager"
+KUAISHOU_HOME_ROOT_ID = "com.smile.gifmaker:id/home_activity_root"
+ADB_KEYBOARD_IME = "com.android.adbkeyboard/.AdbIME"
+ADB_KEYBOARD_B64_ACTION = "ADB_INPUT_B64"
 TRANSIENT_ADB_ERRORS = (
     "daemon not running",
     "cannot connect to daemon",
     "adb server didn't ack",
+    "device '",
 )
 UI_DUMP_SUCCESS_MARKERS = (
     "ui hierchary dumped to:",
@@ -107,10 +118,11 @@ class KuaishouNavigator:
             if len(resource_ids) == 20:
                 break
         return {
-            "has_search_editor": self.maybe_find_node(ui_xml, KUAISHOU_EDITOR_ID) is not None,
+            "has_search_editor": self._find_search_input_node(ui_xml) is not None,
             "has_search_submit": self.maybe_find_node(ui_xml, KUAISHOU_SEARCH_BUTTON_ID) is not None,
             "has_home_search": self.maybe_find_node(ui_xml, KUAISHOU_HOME_SEARCH_BUTTON_ID) is not None,
             "has_teen_prompt": self.maybe_find_node(ui_xml, KUAISHOU_TEEN_MODE_DISMISS_ID) is not None,
+            "has_search_results_surface": self._is_search_results_page(ui_xml),
             "resource_ids": resource_ids,
         }
 
@@ -167,7 +179,8 @@ class KuaishouNavigator:
         return tuple(int(value) for value in match.groups())  # type: ignore[return-value]
 
     def dump_ui_xml(self) -> str:
-        for attempt in range(3):
+        max_attempts = 4
+        for attempt in range(max_attempts):
             dump_result = self._run("shell", "uiautomator", "dump", KUAISHOU_UI_DUMP_PATH, retries=0)
             dump_output = self._decode_output(dump_result.stdout).lower()
             dump_succeeded = any(marker in dump_output for marker in UI_DUMP_SUCCESS_MARKERS)
@@ -194,7 +207,7 @@ class KuaishouNavigator:
             ui_xml = self._decode_output(result.stdout).strip()
             if ui_xml.startswith("<?xml"):
                 return ui_xml
-            if attempt == 2:
+            if attempt == max_attempts - 1:
                 raise KuaishouNavigationError("uiautomator dump did not return XML")
             self.sleeper(0.5)
         raise KuaishouNavigationError("uiautomator dump did not return XML")  # pragma: no cover
@@ -219,6 +232,18 @@ class KuaishouNavigator:
             return self.find_node(ui_xml, resource_id)
         except KuaishouNavigationError:
             return None
+
+    def _find_search_input_node(self, ui_xml: str) -> UiNode | None:
+        return self.maybe_find_node(ui_xml, KUAISHOU_EDITOR_ID) or self.maybe_find_node(
+            ui_xml,
+            KUAISHOU_SEARCH_RESULT_TEXT_ID,
+        )
+
+    def _current_search_text(self, ui_xml: str) -> str:
+        node = self._find_search_input_node(ui_xml)
+        if node is None:
+            return ""
+        return node.text
 
     def current_activity(self) -> str:
         result = self._run("shell", "dumpsys", "activity", "activities")
@@ -245,21 +270,104 @@ class KuaishouNavigator:
         if result.returncode != 0:
             raise KuaishouNavigationError(self._decode_output(result.stderr) or f"Failed to send keyevent {keycode}")
 
+    def list_input_methods(self) -> str:
+        result = self._run("shell", "ime", "list", "-a")
+        if result.returncode != 0:
+            raise KuaishouNavigationError(self._decode_output(result.stderr) or "Failed to list input methods")
+        return self._decode_output(result.stdout)
+
+    def get_default_input_method(self) -> str:
+        result = self._run("shell", "settings", "get", "secure", "default_input_method")
+        if result.returncode != 0:
+            raise KuaishouNavigationError(
+                self._decode_output(result.stderr) or "Failed to get current default input method"
+            )
+        return self._decode_output(result.stdout).strip()
+
+    def set_input_method(self, ime_id: str, *, enable: bool = False) -> None:
+        if enable:
+            enable_result = self._run("shell", "ime", "enable", ime_id)
+            if enable_result.returncode != 0:
+                raise KuaishouNavigationError(
+                    self._decode_output(enable_result.stderr) or f"Failed to enable input method {ime_id}"
+                )
+        result = self._run("shell", "ime", "set", ime_id)
+        if result.returncode != 0:
+            raise KuaishouNavigationError(
+                self._decode_output(result.stderr) or f"Failed to switch input method to {ime_id}"
+            )
+
+    def input_text_with_adb_keyboard(self, value: str) -> None:
+        current_ime = self.get_default_input_method()
+        restore_ime = current_ime if current_ime and current_ime != ADB_KEYBOARD_IME else None
+        if restore_ime is not None:
+            self.set_input_method(ADB_KEYBOARD_IME, enable=True)
+        try:
+            payload = base64.b64encode(value.encode("utf-8")).decode("ascii")
+            result = self._run(
+                "shell",
+                "am",
+                "broadcast",
+                "-a",
+                ADB_KEYBOARD_B64_ACTION,
+                "--es",
+                "msg",
+                payload,
+            )
+            if result.returncode != 0:
+                raise KuaishouNavigationError(
+                    self._decode_output(result.stderr) or "Failed to broadcast unicode text via ADBKeyBoard"
+                )
+        finally:
+            if restore_ime is not None:
+                self.set_input_method(restore_ime)
+
+    def input_keyword(self, keyword: str, pinyin: str) -> str:
+        ime_list = self.list_input_methods()
+        if ADB_KEYBOARD_IME in ime_list:
+            self._trace("input_keyword.adb_keyboard", keyword=keyword)
+            try:
+                self.input_text_with_adb_keyboard(keyword)
+                return "adb_keyboard"
+            except KuaishouNavigationError as exc:
+                self._trace("input_keyword.adb_keyboard_failed", keyword=keyword, error=str(exc))
+        self._trace("input_keyword.pinyin", keyword=keyword, pinyin=pinyin)
+        self.input_text(pinyin)
+        self.sleeper(0.5)
+        self.keyevent(62)
+        return "pinyin"
+
     def start_search_activity(self) -> None:
         result = self._run("shell", "am", "start", "-W", "-n", KUAISHOU_SEARCH_ACTIVITY)
         if result.returncode != 0:
             raise KuaishouNavigationError(self._decode_output(result.stderr) or "Failed to launch 快手搜索页")
 
+    def force_stop_app(self, package_name: str) -> None:
+        result = self._run("shell", "am", "force-stop", package_name)
+        if result.returncode != 0:
+            raise KuaishouNavigationError(self._decode_output(result.stderr) or f"Failed to force-stop {package_name}")
+
     def capture_screen(self, destination: str | Path) -> Path:
         target = Path(destination)
-        result = self._run("exec-out", "screencap", "-p", text=False)
-        if result.returncode != 0:
-            raise KuaishouNavigationError(self._decode_output(result.stderr) or "Screenshot failed")
-        payload = result.stdout or b""
-        if isinstance(payload, str):
-            payload = payload.encode()
-        target.write_bytes(payload)
-        return target
+        last_error = "Screenshot failed"
+        for attempt in range(3):
+            result = self._run("exec-out", "screencap", "-p", text=False)
+            if result.returncode != 0:
+                last_error = self._decode_output(result.stderr) or "Screenshot failed"
+                if attempt == 2:
+                    raise KuaishouNavigationError(last_error)
+                self.sleeper(0.5)
+                continue
+            payload = result.stdout or b""
+            if isinstance(payload, str):
+                payload = payload.encode()
+            if payload:
+                target.write_bytes(payload)
+                return target
+            last_error = "Screenshot returned empty payload"
+            if attempt < 2:
+                self.sleeper(0.5)
+        raise KuaishouNavigationError(last_error)
 
     def open_search(self, destination: str | Path) -> Path:
         self.installer.ensure_app(KNOWN_APPS["kuaishou"], launch_after_install=True)
@@ -272,18 +380,82 @@ class KuaishouNavigator:
         return self.capture_screen(destination)
 
     def _is_search_page(self, ui_xml: str) -> bool:
-        return self.maybe_find_node(ui_xml, KUAISHOU_EDITOR_ID) is not None and self.maybe_find_node(
+        return not self._is_search_results_page(ui_xml) and self._find_search_input_node(ui_xml) is not None and self.maybe_find_node(
             ui_xml,
             KUAISHOU_SEARCH_BUTTON_ID,
         ) is not None
 
+    def _is_search_group_result_page(self, ui_xml: str) -> bool:
+        return self.maybe_find_node(ui_xml, KUAISHOU_SEARCH_GROUP_WEBVIEW_ID) is not None and self.maybe_find_node(
+            ui_xml,
+            KUAISHOU_SEARCH_GROUP_BACK_ID,
+        ) is not None
+
+    def _is_search_results_page(self, ui_xml: str) -> bool:
+        return (
+            self.maybe_find_node(ui_xml, KUAISHOU_SEARCH_RESULT_TEXT_ID) is not None
+            and self.maybe_find_node(ui_xml, KUAISHOU_SEARCH_GROUP_WEBVIEW_ID) is not None
+            and (
+                self.maybe_find_node(ui_xml, KUAISHOU_SEARCH_RESULTS_ROOT_ID) is not None
+                or self.maybe_find_node(ui_xml, KUAISHOU_SEARCH_RESULTS_TAB_ID) is not None
+                or self.maybe_find_node(ui_xml, KUAISHOU_SEARCH_RESULTS_VIEW_PAGER_ID) is not None
+            )
+        )
+
+    def _is_home_feed_page(self, ui_xml: str) -> bool:
+        return self.maybe_find_node(ui_xml, KUAISHOU_HOME_ROOT_ID) is not None
+
+    def _recover_from_search_group_result(self) -> str:
+        package_name = KNOWN_APPS["kuaishou"].package_name
+        self._trace("ensure_search_page.force_stop_relaunch", package_name=package_name)
+        self.force_stop_app(package_name)
+        self.sleeper(1)
+        self.installer.launch_app(package_name)
+        self.sleeper(3)
+        ui_xml = self.dump_ui_xml()
+        self._trace_ui_state("after_force_stop_relaunch", ui_xml)
+        return ui_xml
+
+    def _recover_from_search_results_page(self, ui_xml: str) -> str:
+        query_node = self.find_node(ui_xml, KUAISHOU_SEARCH_RESULT_TEXT_ID)
+        self._trace("ensure_search_page.tap_result_query", center=query_node.center)
+        self.tap(*query_node.center)
+        self.sleeper(1)
+        recovered_ui = self.dump_ui_xml()
+        self._trace_ui_state("after_tap_result_query", recovered_ui)
+        return recovered_ui
+
     def ensure_search_page_ui(self) -> str:
         self.installer.ensure_app(KNOWN_APPS["kuaishou"], launch_after_install=True)
         self.sleeper(2)
-        ui_xml = self.dump_ui_xml()
+        try:
+            ui_xml = self.dump_ui_xml()
+        except KuaishouNavigationError as exc:
+            self._trace("ensure_search_page.initial_dump_failed", error=str(exc))
+            activity = self.current_activity()
+            self._trace("ensure_search_page.activity_after_initial_dump_failed", activity=activity)
+            if activity == KUAISHOU_HOME_ACTIVITY:
+                self._trace("ensure_search_page.tap_home_search_without_ui_dump", center=KUAISHOU_SEARCH_TAP)
+                self.tap(*KUAISHOU_SEARCH_TAP)
+                self.sleeper(2)
+                ui_xml = self.dump_ui_xml()
+                self._trace_ui_state("after_tap_home_search_without_ui_dump", ui_xml)
+                if self._is_search_page(ui_xml):
+                    return ui_xml
+            raise
         self._trace_ui_state("launch", ui_xml)
         if self._is_search_page(ui_xml):
             return ui_xml
+
+        if self._is_search_group_result_page(ui_xml):
+            ui_xml = self._recover_from_search_group_result()
+            if self._is_search_page(ui_xml):
+                return ui_xml
+
+        if self._is_search_results_page(ui_xml):
+            ui_xml = self._recover_from_search_results_page(ui_xml)
+            if self._is_search_page(ui_xml):
+                return ui_xml
 
         dismiss_node = self.maybe_find_node(ui_xml, KUAISHOU_TEEN_MODE_DISMISS_ID)
         if dismiss_node is not None:
@@ -292,6 +464,8 @@ class KuaishouNavigator:
             self.sleeper(1)
             ui_xml = self.dump_ui_xml()
             self._trace_ui_state("after_dismiss_teen_prompt", ui_xml)
+            if self._is_search_results_page(ui_xml):
+                ui_xml = self._recover_from_search_results_page(ui_xml)
             if self._is_search_page(ui_xml):
                 return ui_xml
 
@@ -301,6 +475,8 @@ class KuaishouNavigator:
             self.sleeper(2)
             ui_xml = self.dump_ui_xml()
             self._trace_ui_state("after_start_search_activity", ui_xml)
+            if self._is_search_results_page(ui_xml):
+                ui_xml = self._recover_from_search_results_page(ui_xml)
             if self._is_search_page(ui_xml):
                 return ui_xml
         except KuaishouNavigationError as exc:
@@ -313,6 +489,19 @@ class KuaishouNavigator:
             self.sleeper(2)
             ui_xml = self.dump_ui_xml()
             self._trace_ui_state("after_tap_home_search", ui_xml)
+            if self._is_search_results_page(ui_xml):
+                ui_xml = self._recover_from_search_results_page(ui_xml)
+            if self._is_search_page(ui_xml):
+                return ui_xml
+
+        if self._is_home_feed_page(ui_xml):
+            self._trace("ensure_search_page.tap_home_search_hotspot", center=KUAISHOU_SEARCH_TAP)
+            self.tap(*KUAISHOU_SEARCH_TAP)
+            self.sleeper(2)
+            ui_xml = self.dump_ui_xml()
+            self._trace_ui_state("after_tap_home_search_hotspot", ui_xml)
+            if self._is_search_results_page(ui_xml):
+                ui_xml = self._recover_from_search_results_page(ui_xml)
             if self._is_search_page(ui_xml):
                 return ui_xml
 
@@ -326,27 +515,63 @@ class KuaishouNavigator:
         destination: str | Path,
     ) -> Path:
         _ = keyword  # Reserved for future result-page assertions.
-        clear_node = self.find_node(ui_xml, KUAISHOU_CLEAR_ID)
-        editor_node = self.find_node(ui_xml, KUAISHOU_EDITOR_ID)
+        clear_node = self.maybe_find_node(ui_xml, KUAISHOU_CLEAR_ID)
+        editor_node = self._find_search_input_node(ui_xml)
+        if editor_node is None:
+            raise KuaishouNavigationError("Could not find search input node on the current 快手 page")
         search_button = self.find_node(ui_xml, KUAISHOU_SEARCH_BUTTON_ID)
         self._trace(
             "search_keyword.submit",
             keyword=keyword,
-            clear_center=clear_node.center,
+            clear_center=clear_node.center if clear_node is not None else None,
             editor_center=editor_node.center,
             search_center=search_button.center,
             destination=destination,
         )
 
-        self.tap(*clear_node.center)
-        self.sleeper(0.5)
-        self.tap(*editor_node.center)
-        self.sleeper(0.5)
-        self.input_text(pinyin)
-        self.sleeper(0.5)
-        self.keyevent(62)
+        if clear_node is not None:
+            self.tap(*clear_node.center)
+            self.sleeper(0.5)
+        if editor_node.resource_id != KUAISHOU_EDITOR_ID:
+            self.tap(*editor_node.center)
+            self.sleeper(0.5)
+        input_strategy = self.input_keyword(keyword=keyword, pinyin=pinyin)
+        if input_strategy == "adb_keyboard":
+            verified_ui = self.dump_ui_xml()
+            observed_keyword = self._current_search_text(verified_ui)
+            if observed_keyword != keyword:
+                self._trace(
+                    "search_keyword.retry_with_pinyin",
+                    expected=keyword,
+                    observed=observed_keyword,
+                )
+                retry_clear_node = self.maybe_find_node(verified_ui, KUAISHOU_CLEAR_ID)
+                if retry_clear_node is not None:
+                    self.tap(*retry_clear_node.center)
+                    self.sleeper(0.5)
+                self.input_text(pinyin)
+                self.sleeper(0.5)
+                self.keyevent(62)
         self.sleeper(0.5)
         self.tap(*search_button.center)
+        self.sleeper(2)
+        return self.capture_screen(destination)
+
+    def _submit_search_on_search_activity_without_ui(
+        self,
+        keyword: str,
+        pinyin: str,
+        destination: str | Path,
+    ) -> Path:
+        self._trace(
+            "search_keyword.activity_only_submit",
+            keyword=keyword,
+            pinyin=pinyin,
+            destination=destination,
+        )
+        self.input_keyword(keyword=keyword, pinyin=pinyin)
+        self.sleeper(0.5)
+        self.keyevent(66)
         self.sleeper(2)
         return self.capture_screen(destination)
 
@@ -371,8 +596,19 @@ class KuaishouNavigator:
         try:
             ui_xml = self.ensure_search_page_ui()
             return self._submit_search_on_search_page(ui_xml, keyword=keyword, pinyin=pinyin, destination=destination)
-        except Exception as exc:
+        except KuaishouNavigationError as exc:
             self._trace("search_keyword.error", error=str(exc))
+            try:
+                activity = self.current_activity()
+            except KuaishouNavigationError:
+                raise
+            self._trace("search_keyword.error_activity", activity=activity)
+            if activity == KUAISHOU_SEARCH_ACTIVITY:
+                return self._submit_search_on_search_activity_without_ui(
+                    keyword=keyword,
+                    pinyin=pinyin,
+                    destination=destination,
+                )
             raise
 
 

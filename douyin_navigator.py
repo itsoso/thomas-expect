@@ -1,0 +1,426 @@
+from __future__ import annotations
+
+import argparse
+import base64
+from dataclasses import dataclass
+from pathlib import Path
+import re
+import subprocess
+import time
+from typing import Callable
+import xml.etree.ElementTree as ET
+
+from mobile_app_installer import AndroidAppInstaller, KNOWN_APPS
+
+
+Runner = Callable[..., subprocess.CompletedProcess]
+Sleeper = Callable[[float], None]
+
+DOUYIN_PRIVACY_CONSENT_TAP = (640, 2000)
+DOUYIN_FEED_SWIPE_START = (640, 2300)
+DOUYIN_FEED_SWIPE_END = (640, 1000)
+DOUYIN_SEARCH_ICON_TAP = (1188, 223)
+DOUYIN_SEARCH_FIELD_TAP = (620, 223)
+DOUYIN_SEARCH_BUTTON_TAP = (1179, 223)
+DOUYIN_UI_DUMP_PATH = "/sdcard/douyin_nav.xml"
+DOUYIN_CAPTURE_PATH = "/sdcard/douyin_capture.png"
+DOUYIN_SEARCH_INPUT_ID = "com.ss.android.ugc.aweme:id/et_search_kw"
+DOUYIN_SEARCH_BUTTON_ID = "com.ss.android.ugc.aweme:id/4_s"
+ADB_KEYBOARD_IME = "com.android.adbkeyboard/.AdbIME"
+ADB_KEYBOARD_B64_ACTION = "ADB_INPUT_B64"
+TRANSIENT_ADB_ERRORS = (
+    "daemon not running",
+    "cannot connect to daemon",
+    "adb server didn't ack",
+)
+UI_DUMP_SUCCESS_MARKERS = (
+    "ui hierchary dumped to:",
+    "ui hierarchy dumped to:",
+)
+
+
+class DouyinNavigationError(RuntimeError):
+    """Raised when the navigator cannot complete the expected Douyin action."""
+
+
+@dataclass(frozen=True)
+class UiNode:
+    resource_id: str
+    text: str
+    bounds: tuple[int, int, int, int]
+
+    @property
+    def center(self) -> tuple[int, int]:
+        left, top, right, bottom = self.bounds
+        return ((left + right) // 2, (top + bottom) // 2)
+
+
+class DouyinNavigator:
+    def __init__(
+        self,
+        serial: str | None = None,
+        installer: AndroidAppInstaller | None = None,
+        adb_path: str = "adb",
+        runner: Runner | None = None,
+        sleeper: Sleeper | None = None,
+    ) -> None:
+        self.serial = serial
+        self.adb_path = adb_path
+        self.runner = runner or subprocess.run
+        self.sleeper = sleeper or time.sleep
+        self.installer = installer or AndroidAppInstaller(
+            serial=serial,
+            adb_path=adb_path,
+            runner=self.runner,
+            sleeper=self.sleeper,
+        )
+
+    def _build_command(self, *args: str) -> list[str]:
+        command = [self.adb_path]
+        if self.serial:
+            command.extend(["-s", self.serial])
+        command.extend(args)
+        return command
+
+    @staticmethod
+    def _decode_output(value: str | bytes | None) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="ignore")
+        return value
+
+    @classmethod
+    def _is_transient_adb_error(cls, result: subprocess.CompletedProcess) -> bool:
+        combined_output = (cls._decode_output(result.stdout) + "\n" + cls._decode_output(result.stderr)).lower()
+        if any(marker in combined_output for marker in UI_DUMP_SUCCESS_MARKERS):
+            return False
+        return result.returncode == -15 or any(marker in combined_output for marker in TRANSIENT_ADB_ERRORS)
+
+    def _run(
+        self,
+        *args: str,
+        text: bool = True,
+        retries: int = 2,
+        retry_delay_seconds: float = 1.0,
+    ) -> subprocess.CompletedProcess:
+        last_result: subprocess.CompletedProcess | None = None
+        for attempt in range(retries + 1):
+            last_result = self.runner(
+                self._build_command(*args),
+                capture_output=True,
+                text=text,
+                check=False,
+            )
+            if not self._is_transient_adb_error(last_result) or attempt == retries:
+                return last_result
+            self.sleeper(retry_delay_seconds)
+        return last_result  # pragma: no cover
+
+    @staticmethod
+    def _parse_bounds(raw_bounds: str) -> tuple[int, int, int, int]:
+        match = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", raw_bounds)
+        if not match:
+            raise DouyinNavigationError(f"Invalid bounds: {raw_bounds}")
+        return tuple(int(value) for value in match.groups())  # type: ignore[return-value]
+
+    def dump_ui_xml(self) -> str:
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            dump_result = self._run("shell", "uiautomator", "dump", DOUYIN_UI_DUMP_PATH, retries=0)
+            dump_output = self._decode_output(dump_result.stdout).lower()
+            dump_succeeded = any(marker in dump_output for marker in UI_DUMP_SUCCESS_MARKERS)
+            if dump_result.returncode != 0 and not dump_succeeded and not self._is_transient_adb_error(dump_result):
+                raise DouyinNavigationError(self._decode_output(dump_result.stderr) or "Failed to dump Douyin UI")
+            self.sleeper(0.5)
+            read_result = self._run("shell", "cat", DOUYIN_UI_DUMP_PATH)
+            if read_result.returncode != 0:
+                raise DouyinNavigationError(
+                    self._decode_output(read_result.stderr) or "Failed to read dumped Douyin UI XML"
+                )
+            ui_xml = self._decode_output(read_result.stdout).strip()
+            if ui_xml.startswith("<?xml"):
+                return ui_xml
+            if attempt == max_attempts - 1:
+                break
+            self.sleeper(0.5)
+        raise DouyinNavigationError("uiautomator dump did not return XML for Douyin")
+
+    def find_node(self, ui_xml: str, resource_id: str) -> UiNode:
+        root = ET.fromstring(ui_xml)
+        for node in root.iter("node"):
+            if node.attrib.get("resource-id") != resource_id:
+                continue
+            bounds = node.attrib.get("bounds")
+            if not bounds:
+                continue
+            return UiNode(
+                resource_id=resource_id,
+                text=node.attrib.get("text", ""),
+                bounds=self._parse_bounds(bounds),
+            )
+        raise DouyinNavigationError(f"Could not find resource-id={resource_id}")
+
+    def maybe_find_node(self, ui_xml: str, resource_id: str) -> UiNode | None:
+        try:
+            return self.find_node(ui_xml, resource_id)
+        except DouyinNavigationError:
+            return None
+
+    def is_search_page(self, ui_xml: str) -> bool:
+        return (
+            self.maybe_find_node(ui_xml, DOUYIN_SEARCH_INPUT_ID) is not None
+            and self.maybe_find_node(ui_xml, DOUYIN_SEARCH_BUTTON_ID) is not None
+        )
+
+    def current_search_text(self, ui_xml: str) -> str:
+        search_input = self.maybe_find_node(ui_xml, DOUYIN_SEARCH_INPUT_ID)
+        if search_input is None:
+            return ""
+        return search_input.text
+
+    def tap(self, x: int, y: int) -> None:
+        result = self._run("shell", "input", "tap", str(x), str(y))
+        if result.returncode != 0:
+            raise DouyinNavigationError(self._decode_output(result.stderr) or f"Failed to tap {x},{y}")
+
+    def tap_node(self, node: UiNode) -> None:
+        self.tap(*node.center)
+
+    def swipe(self, start: tuple[int, int], end: tuple[int, int], duration_ms: int) -> None:
+        result = self._run(
+            "shell",
+            "input",
+            "swipe",
+            str(start[0]),
+            str(start[1]),
+            str(end[0]),
+            str(end[1]),
+            str(duration_ms),
+        )
+        if result.returncode != 0:
+            raise DouyinNavigationError(self._decode_output(result.stderr) or "Failed to swipe Douyin feed")
+
+    def capture_screen(self, destination: str | Path) -> Path:
+        return self.capture_screen_via_device_file(destination)
+
+    def capture_screen_via_device_file(self, destination: str | Path) -> Path:
+        target = Path(destination)
+        capture_result = self._run(
+            "shell",
+            "screencap",
+            "-p",
+            DOUYIN_CAPTURE_PATH,
+            retries=5,
+            retry_delay_seconds=2.0,
+        )
+        if capture_result.returncode != 0:
+            raise DouyinNavigationError(self._decode_output(capture_result.stderr) or "Fallback screenshot failed")
+        read_result = self._run(
+            "exec-out",
+            "cat",
+            DOUYIN_CAPTURE_PATH,
+            text=False,
+            retries=5,
+            retry_delay_seconds=2.0,
+        )
+        payload = read_result.stdout or b""
+        if isinstance(payload, str):
+            payload = payload.encode()
+        if read_result.returncode != 0 or not payload:
+            raise DouyinNavigationError(self._decode_output(read_result.stderr) or "Fallback screenshot read failed")
+        target.write_bytes(payload)
+        self._run("shell", "rm", "-f", DOUYIN_CAPTURE_PATH, retries=0)
+        return target
+
+    def list_input_methods(self) -> str:
+        result = self._run("shell", "ime", "list", "-a")
+        if result.returncode != 0:
+            raise DouyinNavigationError(self._decode_output(result.stderr) or "Failed to list input methods")
+        return self._decode_output(result.stdout)
+
+    def get_default_input_method(self) -> str:
+        result = self._run("shell", "settings", "get", "secure", "default_input_method")
+        if result.returncode != 0:
+            raise DouyinNavigationError(
+                self._decode_output(result.stderr) or "Failed to get current default input method"
+            )
+        return self._decode_output(result.stdout).strip()
+
+    def set_input_method(self, ime_id: str, *, enable: bool = False) -> None:
+        if enable:
+            enable_result = self._run("shell", "ime", "enable", ime_id)
+            if enable_result.returncode != 0:
+                raise DouyinNavigationError(
+                    self._decode_output(enable_result.stderr) or f"Failed to enable input method {ime_id}"
+                )
+        result = self._run("shell", "ime", "set", ime_id)
+        if result.returncode != 0:
+            raise DouyinNavigationError(
+                self._decode_output(result.stderr) or f"Failed to switch input method to {ime_id}"
+            )
+
+    def input_text(self, value: str) -> None:
+        result = self._run("shell", "input", "text", value)
+        if result.returncode != 0:
+            raise DouyinNavigationError(self._decode_output(result.stderr) or f"Failed to input text: {value}")
+
+    def keyevent(self, keycode: int) -> None:
+        result = self._run("shell", "input", "keyevent", str(keycode))
+        if result.returncode != 0:
+            raise DouyinNavigationError(self._decode_output(result.stderr) or f"Failed to send keyevent {keycode}")
+
+    def delete_text(self, characters: int) -> None:
+        if characters <= 0:
+            return
+        result = self._run(
+            "shell",
+            "sh",
+            "-c",
+            f'i=0; while [ "$i" -lt {characters} ]; do input keyevent 67; i=$((i+1)); done',
+        )
+        if result.returncode != 0:
+            raise DouyinNavigationError(self._decode_output(result.stderr) or "Failed to clear existing search text")
+
+    def clear_existing_search_text(self, ui_xml: str) -> None:
+        current_ui = ui_xml
+        for _ in range(3):
+            search_input = self.find_node(current_ui, DOUYIN_SEARCH_INPUT_ID)
+            existing = search_input.text.strip()
+            if not existing:
+                return
+            self.tap_node(search_input)
+            self.sleeper(0.2)
+            self.delete_text(max(len(existing) + 2, 6))
+            self.sleeper(0.2)
+            current_ui = self.dump_ui_xml()
+
+    def input_text_with_adb_keyboard(self, value: str) -> None:
+        current_ime = self.get_default_input_method()
+        restore_ime = current_ime if current_ime and current_ime != ADB_KEYBOARD_IME else None
+        if restore_ime is not None:
+            self.set_input_method(ADB_KEYBOARD_IME, enable=True)
+        try:
+            payload = base64.b64encode(value.encode("utf-8")).decode("ascii")
+            result = self._run(
+                "shell",
+                "am",
+                "broadcast",
+                "-a",
+                ADB_KEYBOARD_B64_ACTION,
+                "--es",
+                "msg",
+                payload,
+            )
+            if result.returncode != 0:
+                raise DouyinNavigationError(
+                    self._decode_output(result.stderr) or "Failed to broadcast unicode text via ADBKeyBoard"
+                )
+        finally:
+            if restore_ime is not None:
+                self.set_input_method(restore_ime)
+
+    def input_keyword(self, keyword: str, pinyin: str) -> None:
+        ime_list = self.list_input_methods()
+        if ADB_KEYBOARD_IME in ime_list:
+            try:
+                self.input_text_with_adb_keyboard(keyword)
+                return
+            except DouyinNavigationError:
+                pass
+        self.input_text(pinyin)
+        self.sleeper(0.5)
+        self.keyevent(62)
+
+    def _open_search_flow(self) -> None:
+        self.installer.ensure_app(KNOWN_APPS["douyin"], launch_after_install=True)
+        self.sleeper(2)
+        self.tap(*DOUYIN_PRIVACY_CONSENT_TAP)
+        self.sleeper(1)
+        self.swipe(DOUYIN_FEED_SWIPE_START, DOUYIN_FEED_SWIPE_END, 250)
+        self.sleeper(0.5)
+        self.swipe(DOUYIN_FEED_SWIPE_START, DOUYIN_FEED_SWIPE_END, 250)
+        self.sleeper(0.5)
+        self.tap(*DOUYIN_SEARCH_ICON_TAP)
+        self.sleeper(1)
+
+    def open_search(self, destination: str | Path) -> Path:
+        self._open_search_flow()
+        return self.capture_screen(destination)
+
+    def search_keyword_on_search_page(
+        self,
+        keyword: str,
+        pinyin: str,
+        destination: str | Path,
+    ) -> Path:
+        self.tap(*DOUYIN_SEARCH_FIELD_TAP)
+        self.sleeper(0.5)
+        ui_xml = self.dump_ui_xml()
+        self.clear_existing_search_text(ui_xml)
+        self.sleeper(0.5)
+        self.input_keyword(keyword=keyword, pinyin=pinyin)
+        self.sleeper(0.5)
+        search_button = self.maybe_find_node(ui_xml, DOUYIN_SEARCH_BUTTON_ID)
+        if search_button is not None:
+            self.tap_node(search_button)
+        else:
+            self.tap(*DOUYIN_SEARCH_BUTTON_TAP)
+        self.sleeper(1)
+        return self.capture_screen(destination)
+
+    def search_keyword(
+        self,
+        keyword: str,
+        pinyin: str,
+        destination: str | Path,
+    ) -> Path:
+        try:
+            ui_xml = self.dump_ui_xml()
+        except DouyinNavigationError:
+            try:
+                return self.search_keyword_on_search_page(
+                    keyword=keyword,
+                    pinyin=pinyin,
+                    destination=destination,
+                )
+            except DouyinNavigationError:
+                self._open_search_flow()
+                return self.search_keyword_on_search_page(
+                    keyword=keyword,
+                    pinyin=pinyin,
+                    destination=destination,
+                )
+        if not self.is_search_page(ui_xml):
+            self._open_search_flow()
+        return self.search_keyword_on_search_page(keyword=keyword, pinyin=pinyin, destination=destination)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Open Douyin search and capture a screenshot.")
+    parser.add_argument("--serial", help="ADB serial to target a specific device.")
+    parser.add_argument("--output", default="/tmp/douyin-search.png", help="Destination screenshot path.")
+    parser.add_argument("--query", help="Search keyword to submit on Douyin.")
+    parser.add_argument("--pinyin", help="Latin input used when ADBKeyBoard is unavailable.")
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    navigator = DouyinNavigator(serial=args.serial)
+    if args.query:
+        if not args.pinyin:
+            raise SystemExit("--query requires --pinyin")
+        output = navigator.search_keyword(
+            keyword=args.query,
+            pinyin=args.pinyin,
+            destination=args.output,
+        )
+    else:
+        output = navigator.open_search(args.output)
+    print(f"Douyin search screenshot saved to {output}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

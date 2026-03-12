@@ -23,6 +23,7 @@ class AppSpec:
     package_name: str
     market_id: str | None = None
     install_tap_points: list[tuple[int, int]] | None = None
+    launcher_activity: str | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,7 @@ KNOWN_APPS: dict[str, AppSpec] = {
         package_name="com.smile.gifmaker",
         market_id="com.smile.gifmaker",
         install_tap_points=[(640, 2610)],
+        launcher_activity="com.smile.gifmaker/com.yxcorp.gifshow.HomeActivity",
     ),
     "xiaohongshu": AppSpec(
         name="小红书",
@@ -88,12 +90,21 @@ class AndroidAppInstaller:
         return command
 
     def _run(self, *args: str, text: bool = True) -> subprocess.CompletedProcess:
-        return self.runner(
+        result = self.runner(
             self._build_command(*args),
             capture_output=True,
             text=text,
             check=False,
         )
+        if result.returncode != 0 and "daemon not running" in (result.stderr or ""):
+            self.sleeper(1)
+            result = self.runner(
+                self._build_command(*args),
+                capture_output=True,
+                text=text,
+                check=False,
+            )
+        return result
 
     def ensure_connected(self) -> None:
         result = self._run("get-state")
@@ -109,16 +120,19 @@ class AndroidAppInstaller:
         result = self._run("shell", "pm", "path", package_name)
         return result.returncode == 0 and "package:" in (result.stdout or "")
 
-    def launch_app(self, package_name: str) -> None:
-        result = self._run(
-            "shell",
-            "monkey",
-            "-p",
-            package_name,
-            "-c",
-            "android.intent.category.LAUNCHER",
-            "1",
-        )
+    def launch_app(self, package_name: str, launcher_activity: str | None = None) -> None:
+        if launcher_activity:
+            result = self._run("shell", "am", "start", "-W", "-n", launcher_activity)
+        else:
+            result = self._run(
+                "shell",
+                "monkey",
+                "-p",
+                package_name,
+                "-c",
+                "android.intent.category.LAUNCHER",
+                "1",
+            )
         if result.returncode != 0:
             raise AppInstallError(result.stderr or f"Failed to launch {package_name}")
 
@@ -174,8 +188,8 @@ class AndroidAppInstaller:
             self.open_market_details(spec.market_id)
             self.wait_for_install(spec, timeout_seconds, poll_interval_seconds)
         if launch_after_install:
-            self.launch_app(spec.package_name)
-            if not self.is_installed(spec.package_name):
+            self.launch_app(spec.package_name, spec.launcher_activity)
+            if not already_installed and not self.is_installed(spec.package_name):
                 raise AppInstallError(f"{spec.name} 安装后校验失败")
         return EnsureResult(status=status, package_name=spec.package_name)
 
@@ -208,6 +222,7 @@ def resolve_app_spec(target: str, name: str | None, market_id: str | None) -> Ap
             package_name=known.package_name,
             market_id=market_id or known.market_id,
             install_tap_points=list(known.install_tap_points or []),
+            launcher_activity=known.launcher_activity,
         )
     display_name = name or target
     return AppSpec(
@@ -215,6 +230,7 @@ def resolve_app_spec(target: str, name: str | None, market_id: str | None) -> Ap
         package_name=target,
         market_id=market_id or target,
         install_tap_points=[(640, 2610)],
+        launcher_activity=None,
     )
 
 
