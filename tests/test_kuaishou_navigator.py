@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -15,22 +16,33 @@ class FakeCompletedProcess:
 
 
 class RecordingRunner:
-    def __init__(self, responses: list[FakeCompletedProcess]) -> None:
+    def __init__(self, responses: list[FakeCompletedProcess | BaseException]) -> None:
         self.responses = list(responses)
         self.calls: list[dict[str, object]] = []
 
-    def __call__(self, cmd: list[str], capture_output: bool = True, text: bool = True, check: bool = False):
+    def __call__(
+        self,
+        cmd: list[str],
+        capture_output: bool = True,
+        text: bool = True,
+        check: bool = False,
+        timeout: float | None = None,
+    ):
         self.calls.append(
             {
                 "cmd": cmd,
                 "capture_output": capture_output,
                 "text": text,
                 "check": check,
+                "timeout": timeout,
             }
         )
         if not self.responses:
             raise AssertionError(f"Missing fake response for command: {cmd}")
-        return self.responses.pop(0)
+        next_response = self.responses.pop(0)
+        if isinstance(next_response, BaseException):
+            raise next_response
+        return next_response
 
 
 class FakeInstaller:
@@ -310,6 +322,71 @@ def test_capture_screen_falls_back_to_device_file_when_direct_exec_out_fails(tmp
     assert runner.calls[5]["cmd"] == ["adb", "-s", "deec9116", "shell", "rm", "-f", "/sdcard/kuaishou_capture.png"]
 
 
+def test_capture_screen_accepts_partial_png_payload_even_with_transient_returncode(tmp_path: Path) -> None:
+    from kuaishou_navigator import KuaishouNavigator
+
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(returncode=-15, stdout=b"\x89PNG\r\n\x1a\nPNGDATA"),
+        ]
+    )
+
+    navigator = KuaishouNavigator(
+        serial="deec9116",
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    target = tmp_path / "partial-png.png"
+    written = navigator.capture_screen(target)
+
+    assert written == target
+    assert target.read_bytes() == b"\x89PNG\r\n\x1a\nPNGDATA"
+    assert len(runner.calls) == 1
+    assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
+
+
+def test_capture_screen_via_device_file_accepts_transient_screencap_when_file_exists(tmp_path: Path) -> None:
+    from kuaishou_navigator import KuaishouNavigator
+
+    navigator = KuaishouNavigator(
+        serial="deec9116",
+        runner=RecordingRunner([]),
+        sleeper=lambda _seconds: None,
+    )
+
+    responses = [
+        FakeCompletedProcess(returncode=-15, stderr="* daemon not running; starting now at tcp:5037"),
+        FakeCompletedProcess(
+            returncode=0,
+            stdout="-rw-rw---- 1 u0_a241 media_rw 2173569 2026-03-12 14:25 /sdcard/kuaishou_capture.png\n",
+        ),
+        FakeCompletedProcess(stdout=b"PNGDATA"),
+        FakeCompletedProcess(),
+    ]
+    commands: list[tuple[str, ...]] = []
+
+    def fake_run(*args: str, **_kwargs):
+        commands.append(args)
+        if not responses:
+            raise AssertionError(f"Missing fake response for command: {args}")
+        return responses.pop(0)
+
+    navigator._run = fake_run  # type: ignore[method-assign]
+
+    target = tmp_path / "kuaishou-existing-file-shot.png"
+    written = navigator.capture_screen_via_device_file(target)
+
+    assert written == target
+    assert target.read_bytes() == b"PNGDATA"
+    assert commands == [
+        ("shell", "screencap", "-p", "/sdcard/kuaishou_capture.png"),
+        ("shell", "ls", "-l", "/sdcard/kuaishou_capture.png"),
+        ("exec-out", "cat", "/sdcard/kuaishou_capture.png"),
+        ("shell", "rm", "-f", "/sdcard/kuaishou_capture.png"),
+    ]
+
+
 def test_open_search_raises_when_not_on_home_activity() -> None:
     from kuaishou_navigator import KuaishouNavigator, KuaishouNavigationError
 
@@ -342,6 +419,7 @@ def test_run_retries_transient_adb_startup_error() -> None:
     runner = RecordingRunner(
         [
             FakeCompletedProcess(returncode=-15, stderr="* daemon not running; starting now at tcp:5037"),
+            FakeCompletedProcess(stdout=""),
             FakeCompletedProcess(stdout="device"),
         ]
     )
@@ -355,9 +433,59 @@ def test_run_retries_transient_adb_startup_error() -> None:
     result = navigator._run("get-state")
 
     assert result.stdout == "device"
-    assert len(runner.calls) == 2
+    assert len(runner.calls) == 3
     assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "get-state"]
-    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "get-state"]
+    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "wait-for-device"]
+    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "get-state"]
+
+
+def test_run_accepts_success_even_with_daemon_startup_stderr() -> None:
+    from kuaishou_navigator import KuaishouNavigator
+
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(returncode=0, stdout="device", stderr="* daemon started successfully\n"),
+        ]
+    )
+
+    navigator = KuaishouNavigator(
+        serial="deec9116",
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    result = navigator._run("get-state")
+
+    assert result.stdout == "device"
+    assert len(runner.calls) == 1
+    assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "get-state"]
+
+
+def test_run_retries_timeout_expired_after_waiting_for_device() -> None:
+    from kuaishou_navigator import KuaishouNavigator
+
+    runner = RecordingRunner(
+        [
+            subprocess.TimeoutExpired(cmd=["adb", "-s", "deec9116", "get-state"], timeout=15.0),
+            FakeCompletedProcess(stdout=""),
+            FakeCompletedProcess(stdout="device"),
+        ]
+    )
+
+    navigator = KuaishouNavigator(
+        serial="deec9116",
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    result = navigator._run("get-state")
+
+    assert result.stdout == "device"
+    assert len(runner.calls) == 3
+    assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "get-state"]
+    assert runner.calls[0]["timeout"] == 15.0
+    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "wait-for-device"]
+    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "get-state"]
 
 
 def test_search_keyword_on_search_page_clears_inputs_and_submits(tmp_path: Path) -> None:
@@ -864,6 +992,7 @@ def test_dump_ui_xml_retries_when_cat_temporarily_loses_device() -> None:
         [
             FakeCompletedProcess(stdout="UI hierchary dumped to: /sdcard/kuaishou_nav.xml\n"),
             FakeCompletedProcess(returncode=1, stderr="adb: device 'deec9116' not found\n"),
+            FakeCompletedProcess(stdout=""),
             FakeCompletedProcess(stdout=SEARCH_PAGE_XML),
         ]
     )
@@ -879,7 +1008,8 @@ def test_dump_ui_xml_retries_when_cat_temporarily_loses_device() -> None:
     assert xml.strip() == SEARCH_PAGE_XML.strip()
     assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "shell", "uiautomator", "dump", "/sdcard/kuaishou_nav.xml"]
     assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "shell", "cat", "/sdcard/kuaishou_nav.xml"]
-    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "shell", "cat", "/sdcard/kuaishou_nav.xml"]
+    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "wait-for-device"]
+    assert runner.calls[3]["cmd"] == ["adb", "-s", "deec9116", "shell", "cat", "/sdcard/kuaishou_nav.xml"]
 
 
 def test_search_keyword_writes_trace_file_when_trace_dir_is_enabled(tmp_path: Path) -> None:

@@ -49,6 +49,7 @@ UI_DUMP_SUCCESS_MARKERS = (
     "ui hierchary dumped to:",
     "ui hierarchy dumped to:",
 )
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
 class KuaishouNavigationError(RuntimeError):
@@ -75,12 +76,14 @@ class KuaishouNavigator:
         adb_path: str = "adb",
         runner: Runner | None = None,
         sleeper: Sleeper | None = None,
+        command_timeout_seconds: float = 15.0,
         trace_dir: str | Path | None = None,
     ) -> None:
         self.serial = serial
         self.adb_path = adb_path
         self.runner = runner or subprocess.run
         self.sleeper = sleeper or time.sleep
+        self.command_timeout_seconds = command_timeout_seconds
         self.trace_dir = Path(trace_dir) if trace_dir else None
         if self.trace_dir is not None:
             self.trace_dir.mkdir(parents=True, exist_ok=True)
@@ -143,6 +146,8 @@ class KuaishouNavigator:
 
     @classmethod
     def _is_transient_adb_error(cls, result: subprocess.CompletedProcess) -> bool:
+        if result.returncode == 0:
+            return False
         combined_output = (cls._decode_output(result.stdout) + "\n" + cls._decode_output(result.stderr)).lower()
         if any(marker in combined_output for marker in UI_DUMP_SUCCESS_MARKERS):
             return False
@@ -161,17 +166,86 @@ class KuaishouNavigator:
         text: bool = True,
         retries: int = 2,
         retry_delay_seconds: float = 1.0,
+        timeout_seconds: float | None = None,
+        accept_partial_bytes_prefix: bytes | None = None,
     ) -> subprocess.CompletedProcess:
         last_result: subprocess.CompletedProcess | None = None
+        timeout = self.command_timeout_seconds if timeout_seconds is None else timeout_seconds
         for attempt in range(retries + 1):
-            last_result = self.runner(
-                self._build_command(*args),
-                capture_output=True,
+            command = self._build_command(*args)
+            self._trace(
+                "adb_command_start",
+                command=command,
+                attempt=attempt + 1,
+                retries=retries,
+                timeout=timeout,
                 text=text,
-                check=False,
             )
+            try:
+                last_result = self.runner(
+                    command,
+                    capture_output=True,
+                    text=text,
+                    check=False,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired as exc:
+                self._trace(
+                    "adb_command_timeout",
+                    command=command,
+                    attempt=attempt + 1,
+                    timeout=timeout,
+                )
+                stderr = exc.stderr
+                if stderr is None:
+                    stderr = f"Command timed out after {timeout:.1f}s"
+                elif isinstance(stderr, bytes):
+                    stderr = stderr.decode("utf-8", errors="ignore")
+                stdout: str | bytes
+                if exc.stdout is None:
+                    stdout = b"" if not text else ""
+                else:
+                    stdout = exc.stdout
+                last_result = subprocess.CompletedProcess(
+                    command,
+                    returncode=-15,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            self._trace(
+                "adb_command_result",
+                command=command,
+                attempt=attempt + 1,
+                returncode=last_result.returncode,
+                stdout_preview=self._decode_output(last_result.stdout)[:200],
+                stderr_preview=self._decode_output(last_result.stderr)[:200],
+            )
+            if accept_partial_bytes_prefix is not None:
+                payload = last_result.stdout or b""
+                if isinstance(payload, str):
+                    payload = payload.encode()
+                if payload.startswith(accept_partial_bytes_prefix):
+                    return last_result
             if not self._is_transient_adb_error(last_result) or attempt == retries:
                 return last_result
+            wait_command = self._build_command("wait-for-device")
+            wait_result = self.runner(
+                wait_command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout,
+            )
+            self._trace(
+                "adb_wait_for_device",
+                command=wait_command,
+                attempt=attempt + 1,
+                returncode=wait_result.returncode,
+                stdout_preview=self._decode_output(wait_result.stdout)[:200],
+                stderr_preview=self._decode_output(wait_result.stderr)[:200],
+            )
+            if wait_result.returncode != 0 and attempt == retries:
+                return wait_result
             self.sleeper(retry_delay_seconds)
         return last_result  # pragma: no cover
 
@@ -361,6 +435,7 @@ class KuaishouNavigator:
                 text=False,
                 retries=5,
                 retry_delay_seconds=2.0,
+                accept_partial_bytes_prefix=PNG_SIGNATURE,
             )
             payload = direct_result.stdout or b""
             if isinstance(payload, str):
@@ -382,7 +457,7 @@ class KuaishouNavigator:
             retries=5,
             retry_delay_seconds=2.0,
         )
-        if capture_result.returncode != 0:
+        if capture_result.returncode != 0 and not self._device_file_exists(KUAISHOU_CAPTURE_PATH):
             raise KuaishouNavigationError(self._decode_output(capture_result.stderr) or "Fallback screenshot failed")
         read_result = self._run(
             "exec-out",
@@ -391,6 +466,7 @@ class KuaishouNavigator:
             text=False,
             retries=5,
             retry_delay_seconds=2.0,
+            accept_partial_bytes_prefix=PNG_SIGNATURE,
         )
         payload = read_result.stdout or b""
         if isinstance(payload, str):
@@ -402,6 +478,10 @@ class KuaishouNavigator:
         target.write_bytes(payload)
         self._run("shell", "rm", "-f", KUAISHOU_CAPTURE_PATH, retries=0)
         return target
+
+    def _device_file_exists(self, path: str) -> bool:
+        result = self._run("shell", "ls", "-l", path, retries=2, retry_delay_seconds=1.0)
+        return result.returncode == 0 and bool(self._decode_output(result.stdout).strip())
 
     def open_search(self, destination: str | Path) -> Path:
         self.installer.ensure_app(KNOWN_APPS["kuaishou"], launch_after_install=True)
