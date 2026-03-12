@@ -54,6 +54,12 @@ class FakeKuaishouNavigator:
         target.write_bytes(b"KUAISHOU-RESULT")
         return target
 
+    def search_and_enter_first_live_room(self, keyword: str, pinyin: str, destination: str | Path) -> Path:
+        self.calls.append(("search_and_enter_first_live_room", (keyword, pinyin, str(destination))))
+        target = Path(destination)
+        target.write_bytes(b"KUAISHOU-LIVE")
+        return target
+
 
 class FakeXiaohongshuNavigator:
     instances: list["FakeXiaohongshuNavigator"] = []
@@ -156,6 +162,40 @@ def test_router_routes_kuaishou_search_and_passes_trace_dir(tmp_path: Path) -> N
     ]
 
 
+def test_router_routes_kuaishou_open_first_result_to_live_room(tmp_path: Path) -> None:
+    from public_browse_router import PublicBrowseRequest, PublicBrowseRouter
+
+    reset_fake_navigators()
+    router = PublicBrowseRouter(
+        douyin_factory=FakeDouyinNavigator,
+        kuaishou_factory=FakeKuaishouNavigator,
+        xiaohongshu_factory=FakeXiaohongshuNavigator,
+    )
+
+    target = tmp_path / "kuaishou-live.png"
+    trace_dir = tmp_path / "trace"
+    written = router.execute(
+        PublicBrowseRequest(
+            platform="kuaishou",
+            action="open-first-result",
+            query="美女直播",
+            pinyin="meinvzhibo",
+            output=target,
+            serial="device-4",
+            trace_dir=trace_dir,
+        )
+    )
+
+    assert written == target
+    assert target.read_bytes() == b"KUAISHOU-LIVE"
+    assert len(FakeKuaishouNavigator.instances) == 1
+    assert FakeKuaishouNavigator.instances[0].serial == "device-4"
+    assert FakeKuaishouNavigator.instances[0].trace_dir == str(trace_dir)
+    assert FakeKuaishouNavigator.instances[0].calls == [
+        ("search_and_enter_first_live_room", ("美女直播", "meinvzhibo", str(target)))
+    ]
+
+
 def test_router_routes_xiaohongshu_open_first_result(tmp_path: Path) -> None:
     from public_browse_router import PublicBrowseRequest, PublicBrowseRouter
 
@@ -184,27 +224,6 @@ def test_router_routes_xiaohongshu_open_first_result(tmp_path: Path) -> None:
     assert FakeXiaohongshuNavigator.instances[0].calls == [
         ("search_and_open_first_note", ("hanfu", str(target)))
     ]
-
-
-def test_router_rejects_unsupported_kuaishou_open_first_result(tmp_path: Path) -> None:
-    from public_browse_router import PublicBrowseRequest, PublicBrowseRouter, PublicBrowseRouterError
-
-    router = PublicBrowseRouter(
-        douyin_factory=FakeDouyinNavigator,
-        kuaishou_factory=FakeKuaishouNavigator,
-        xiaohongshu_factory=FakeXiaohongshuNavigator,
-    )
-
-    with pytest.raises(PublicBrowseRouterError, match="does not support action"):
-        router.execute(
-            PublicBrowseRequest(
-                platform="kuaishou",
-                action="open-first-result",
-                query="直播带货",
-                pinyin="zhibodaihuo",
-                output=tmp_path / "ignored.png",
-            )
-        )
 
 
 def test_router_requires_query_for_search_actions(tmp_path: Path) -> None:

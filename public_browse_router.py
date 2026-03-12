@@ -16,7 +16,7 @@ XiaohongshuFactory = Callable[..., XiaohongshuNavigator]
 
 SUPPORTED_ACTIONS: dict[str, tuple[str, ...]] = {
     "douyin": ("open-search", "search", "open-first-result"),
-    "kuaishou": ("open-search", "search"),
+    "kuaishou": ("open-search", "search", "open-first-result"),
     "xiaohongshu": ("open-search", "search", "open-first-result"),
 }
 
@@ -79,7 +79,17 @@ class PublicBrowseRouter:
             navigator = self.kuaishou_factory(serial=request.serial, trace_dir=request.trace_dir)
             if request.action == "open-search":
                 return navigator.open_search(target)
-            return navigator.search_keyword(keyword=request.query or "", pinyin=request.pinyin or "", destination=target)
+            if request.action == "search":
+                return navigator.search_keyword(
+                    keyword=request.query or "",
+                    pinyin=request.pinyin or "",
+                    destination=target,
+                )
+            return navigator.search_and_enter_first_live_room(
+                keyword=request.query or "",
+                pinyin=request.pinyin or "",
+                destination=target,
+            )
 
         navigator = self.xiaohongshu_factory(serial=request.serial)
         if request.action == "open-search":

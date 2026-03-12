@@ -102,6 +102,58 @@ def test_ensure_app_uses_explicit_launcher_activity_when_provided() -> None:
     ]
 
 
+def test_ensure_app_retries_explicit_launcher_after_device_not_found() -> None:
+    from mobile_app_installer import AndroidAppInstaller, AppSpec
+
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(stdout="device\n"),
+            FakeCompletedProcess(returncode=0, stdout="package:/data/app/base.apk\n"),
+            FakeCompletedProcess(returncode=1, stderr="adb: device 'deec9116' not found"),
+            FakeCompletedProcess(returncode=0, stdout=""),
+            FakeCompletedProcess(returncode=0, stdout="Starting: Intent"),
+        ]
+    )
+
+    installer = AndroidAppInstaller(serial="deec9116", runner=runner, sleeper=lambda _seconds: None)
+    result = installer.ensure_app(
+        AppSpec(
+            name="快手",
+            package_name="com.smile.gifmaker",
+            launcher_activity="com.smile.gifmaker/com.yxcorp.gifshow.HomeActivity",
+        )
+    )
+
+    assert result.status == "already-installed"
+    assert runner.calls == [
+        ["adb", "-s", "deec9116", "get-state"],
+        ["adb", "-s", "deec9116", "shell", "pm", "path", "com.smile.gifmaker"],
+        [
+            "adb",
+            "-s",
+            "deec9116",
+            "shell",
+            "am",
+            "start",
+            "-W",
+            "-n",
+            "com.smile.gifmaker/com.yxcorp.gifshow.HomeActivity",
+        ],
+        ["adb", "-s", "deec9116", "wait-for-device"],
+        [
+            "adb",
+            "-s",
+            "deec9116",
+            "shell",
+            "am",
+            "start",
+            "-W",
+            "-n",
+            "com.smile.gifmaker/com.yxcorp.gifshow.HomeActivity",
+        ],
+    ]
+
+
 def test_ensure_app_missing_opens_market_and_waits_until_installed() -> None:
     from mobile_app_installer import AndroidAppInstaller, AppSpec
 
@@ -220,6 +272,7 @@ def test_ensure_connected_retries_once_when_adb_daemon_is_bootstrapping() -> Non
                 stdout="",
                 stderr="* daemon not running; starting now at tcp:5037\n",
             ),
+            FakeCompletedProcess(returncode=0, stdout=""),
             FakeCompletedProcess(returncode=0, stdout="device\n"),
         ]
     )
@@ -230,6 +283,7 @@ def test_ensure_connected_retries_once_when_adb_daemon_is_bootstrapping() -> Non
 
     assert runner.calls == [
         ["adb", "-s", "deec9116", "get-state"],
+        ["adb", "-s", "deec9116", "wait-for-device"],
         ["adb", "-s", "deec9116", "get-state"],
     ]
 

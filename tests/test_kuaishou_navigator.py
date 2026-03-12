@@ -438,6 +438,42 @@ def test_search_keyword_on_search_page_prefers_adb_keyboard_for_unicode_text(tmp
     assert runner.calls[12]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
 
 
+def test_search_keyword_on_search_page_skips_retyping_when_keyword_already_matches(tmp_path: Path) -> None:
+    from kuaishou_navigator import KuaishouNavigator
+
+    installer = FakeInstaller()
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(stdout="UI hierchary dumped to: /sdcard/kuaishou_nav.xml\n"),
+            FakeCompletedProcess(stdout=SEARCH_PAGE_WITH_EXPECTED_KEYWORD_XML),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=b"PNGDATA"),
+        ]
+    )
+
+    navigator = KuaishouNavigator(
+        serial="deec9116",
+        installer=installer,
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    target = tmp_path / "kuaishou-search-already-matched.png"
+    written = navigator.search_keyword_on_search_page(
+        keyword="直播带货",
+        pinyin="zhibodaihuo",
+        destination=target,
+    )
+
+    assert written == target
+    assert target.read_bytes() == b"PNGDATA"
+    assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "shell", "uiautomator", "dump", "/sdcard/kuaishou_nav.xml"]
+    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "shell", "cat", "/sdcard/kuaishou_nav.xml"]
+    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1169", "223"]
+    assert runner.calls[3]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
+    assert len(runner.calls) == 4
+
+
 def test_search_keyword_on_search_page_falls_back_to_pinyin_when_adb_keyboard_switch_fails(tmp_path: Path) -> None:
     from kuaishou_navigator import KuaishouNavigator
 
@@ -1109,3 +1145,106 @@ def test_search_keyword_uses_activity_only_search_fallback_when_search_activity_
     assert runner.calls[20]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "text", "zhibodaihuo"]
     assert runner.calls[21]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "keyevent", "62"]
     assert runner.calls[22]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "keyevent", "66"]
+
+
+def test_open_live_results_taps_live_tab_and_captures_screen(tmp_path: Path) -> None:
+    from kuaishou_navigator import KuaishouNavigator
+
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=b"PNGDATA"),
+        ]
+    )
+
+    navigator = KuaishouNavigator(
+        serial="deec9116",
+        installer=FakeInstaller(),
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    target = tmp_path / "kuaishou-live-results.png"
+    written = navigator.open_live_results(target)
+
+    assert written == target
+    assert target.read_bytes() == b"PNGDATA"
+    assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "246", "366"]
+    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
+    assert runner.calls[1]["text"] is False
+
+
+def test_enter_first_live_room_taps_first_card_and_captures_screen(tmp_path: Path) -> None:
+    from kuaishou_navigator import KuaishouNavigator
+
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=b"PNGDATA"),
+        ]
+    )
+
+    navigator = KuaishouNavigator(
+        serial="deec9116",
+        installer=FakeInstaller(),
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    target = tmp_path / "kuaishou-live-room.png"
+    written = navigator.enter_first_live_room(target)
+
+    assert written == target
+    assert target.read_bytes() == b"PNGDATA"
+    assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "420", "960"]
+    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
+    assert runner.calls[1]["text"] is False
+
+
+def test_search_and_enter_first_live_room_runs_full_public_live_flow(tmp_path: Path) -> None:
+    from kuaishou_navigator import KuaishouNavigator
+
+    class FlowNavigator(KuaishouNavigator):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.actions: list[tuple[str, str, str, str]] = []
+
+        def search_keyword(self, keyword: str, pinyin: str, destination: str | Path) -> Path:
+            self.actions.append(("search", keyword, pinyin, str(destination)))
+            target = Path(destination)
+            target.write_bytes(b"SEARCH")
+            return target
+
+        def open_live_results(self, destination: str | Path) -> Path:
+            self.actions.append(("live-results", "", "", str(destination)))
+            target = Path(destination)
+            target.write_bytes(b"LIVE")
+            return target
+
+        def enter_first_live_room(self, destination: str | Path) -> Path:
+            self.actions.append(("enter-live-room", "", "", str(destination)))
+            target = Path(destination)
+            target.write_bytes(b"ROOM")
+            return target
+
+    navigator = FlowNavigator(
+        serial="deec9116",
+        installer=FakeInstaller(),
+        runner=RecordingRunner([]),
+        sleeper=lambda _seconds: None,
+    )
+
+    target = tmp_path / "kuaishou-live-room-final.png"
+    written = navigator.search_and_enter_first_live_room(
+        keyword="美女直播",
+        pinyin="meinvzhibo",
+        destination=target,
+    )
+
+    assert written == target
+    assert target.read_bytes() == b"ROOM"
+    assert navigator.actions == [
+        ("search", "美女直播", "meinvzhibo", str(target)),
+        ("live-results", "", "", str(target)),
+        ("enter-live-room", "", "", str(target)),
+    ]

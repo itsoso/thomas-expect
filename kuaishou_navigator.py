@@ -20,6 +20,8 @@ Sleeper = Callable[[float], None]
 KUAISHOU_HOME_ACTIVITY = "com.smile.gifmaker/com.yxcorp.gifshow.HomeActivity"
 KUAISHOU_SEARCH_ACTIVITY = "com.smile.gifmaker/com.yxcorp.plugin.search.SearchActivity"
 KUAISHOU_SEARCH_TAP = (1186, 223)
+KUAISHOU_LIVE_TAB_TAP = (246, 366)
+KUAISHOU_FIRST_LIVE_RESULT_TAP = (420, 960)
 KUAISHOU_UI_DUMP_PATH = "/sdcard/kuaishou_nav.xml"
 KUAISHOU_EDITOR_ID = "com.smile.gifmaker:id/editor"
 KUAISHOU_SEARCH_RESULT_TEXT_ID = "com.smile.gifmaker:id/search_result_text"
@@ -529,29 +531,33 @@ class KuaishouNavigator:
             destination=destination,
         )
 
-        if clear_node is not None:
-            self.tap(*clear_node.center)
-            self.sleeper(0.5)
-        if editor_node.resource_id != KUAISHOU_EDITOR_ID:
-            self.tap(*editor_node.center)
-            self.sleeper(0.5)
-        input_strategy = self.input_keyword(keyword=keyword, pinyin=pinyin)
-        if input_strategy == "adb_keyboard":
-            verified_ui = self.dump_ui_xml()
-            observed_keyword = self._current_search_text(verified_ui)
-            if observed_keyword != keyword:
-                self._trace(
-                    "search_keyword.retry_with_pinyin",
-                    expected=keyword,
-                    observed=observed_keyword,
-                )
-                retry_clear_node = self.maybe_find_node(verified_ui, KUAISHOU_CLEAR_ID)
-                if retry_clear_node is not None:
-                    self.tap(*retry_clear_node.center)
-                    self.sleeper(0.5)
-                self.input_text(pinyin)
+        current_keyword = editor_node.text.strip()
+        if current_keyword == keyword.strip():
+            self._trace("search_keyword.skip_retype", keyword=keyword)
+        else:
+            if clear_node is not None:
+                self.tap(*clear_node.center)
                 self.sleeper(0.5)
-                self.keyevent(62)
+            if editor_node.resource_id != KUAISHOU_EDITOR_ID:
+                self.tap(*editor_node.center)
+                self.sleeper(0.5)
+            input_strategy = self.input_keyword(keyword=keyword, pinyin=pinyin)
+            if input_strategy == "adb_keyboard":
+                verified_ui = self.dump_ui_xml()
+                observed_keyword = self._current_search_text(verified_ui)
+                if observed_keyword != keyword:
+                    self._trace(
+                        "search_keyword.retry_with_pinyin",
+                        expected=keyword,
+                        observed=observed_keyword,
+                    )
+                    retry_clear_node = self.maybe_find_node(verified_ui, KUAISHOU_CLEAR_ID)
+                    if retry_clear_node is not None:
+                        self.tap(*retry_clear_node.center)
+                        self.sleeper(0.5)
+                    self.input_text(pinyin)
+                    self.sleeper(0.5)
+                    self.keyevent(62)
         self.sleeper(0.5)
         self.tap(*search_button.center)
         self.sleeper(2)
@@ -610,6 +616,30 @@ class KuaishouNavigator:
                     destination=destination,
                 )
             raise
+
+    def open_live_results(self, destination: str | Path) -> Path:
+        self._trace("open_live_results_start", destination=destination)
+        self.tap(*KUAISHOU_LIVE_TAB_TAP)
+        self.sleeper(2)
+        self._trace("open_live_results_complete", destination=destination)
+        return self.capture_screen(destination)
+
+    def enter_first_live_room(self, destination: str | Path) -> Path:
+        self._trace("enter_first_live_room_start", destination=destination)
+        self.tap(*KUAISHOU_FIRST_LIVE_RESULT_TAP)
+        self.sleeper(3)
+        self._trace("enter_first_live_room_complete", destination=destination)
+        return self.capture_screen(destination)
+
+    def search_and_enter_first_live_room(
+        self,
+        keyword: str,
+        pinyin: str,
+        destination: str | Path,
+    ) -> Path:
+        self.search_keyword(keyword=keyword, pinyin=pinyin, destination=destination)
+        self.open_live_results(destination)
+        return self.enter_first_live_room(destination)
 
 
 def build_parser() -> argparse.ArgumentParser:

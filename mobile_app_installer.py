@@ -12,6 +12,14 @@ Runner = Callable[..., subprocess.CompletedProcess]
 Sleeper = Callable[[float], None]
 Clock = Callable[[], float]
 
+TRANSIENT_ADB_ERRORS = (
+    "daemon not running",
+    "cannot connect to daemon",
+    "adb server didn't ack",
+    "device '",
+    "device offline",
+)
+
 
 class AppInstallError(RuntimeError):
     """Raised when the installer cannot make the requested app available."""
@@ -89,22 +97,46 @@ class AndroidAppInstaller:
         command.extend(args)
         return command
 
-    def _run(self, *args: str, text: bool = True) -> subprocess.CompletedProcess:
-        result = self.runner(
-            self._build_command(*args),
-            capture_output=True,
-            text=text,
-            check=False,
-        )
-        if result.returncode != 0 and "daemon not running" in (result.stderr or ""):
-            self.sleeper(1)
-            result = self.runner(
+    @staticmethod
+    def _decode_output(value: str | bytes | None) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="ignore")
+        return value
+
+    @classmethod
+    def _is_transient_adb_error(cls, result: subprocess.CompletedProcess) -> bool:
+        combined_output = (cls._decode_output(result.stdout) + "\n" + cls._decode_output(result.stderr)).lower()
+        if result.returncode == 0:
+            return False
+        return result.returncode == -15 or any(marker in combined_output for marker in TRANSIENT_ADB_ERRORS)
+
+    def _run(
+        self,
+        *args: str,
+        text: bool = True,
+        retries: int = 2,
+        retry_delay_seconds: float = 1.0,
+    ) -> subprocess.CompletedProcess:
+        last_result: subprocess.CompletedProcess | None = None
+        for attempt in range(retries + 1):
+            last_result = self.runner(
                 self._build_command(*args),
                 capture_output=True,
                 text=text,
                 check=False,
             )
-        return result
+            if not self._is_transient_adb_error(last_result) or attempt == retries:
+                return last_result
+            self.runner(
+                self._build_command("wait-for-device"),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.sleeper(retry_delay_seconds)
+        return last_result  # pragma: no cover
 
     def ensure_connected(self) -> None:
         result = self._run("get-state")
