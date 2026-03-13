@@ -24,6 +24,10 @@ XHS_CAPTURE_PATH = "/sdcard/xhs_nav.png"
 ADB_KEYBOARD_IME = "com.android.adbkeyboard/.AdbIME"
 ADB_KEYBOARD_B64_ACTION = "ADB_INPUT_B64"
 DELETE_TEXT_BATCH_SIZE = 12
+XHS_LAUNCH_SETTLE_SECONDS = 1.0
+XHS_DISCOVERY_TAP_SETTLE_SECONDS = 1.0
+XHS_PRIVACY_TAP_SETTLE_SECONDS = 0.5
+XHS_SEARCH_ICON_SETTLE_SECONDS = 1.0
 TRANSIENT_ADB_ERRORS = (
     "daemon not running",
     "cannot connect to daemon",
@@ -326,11 +330,11 @@ class XiaohongshuNavigator:
         self._trace("open_discovery_start", destination=str(destination))
         self._trace("open_discovery_launch_start")
         self.launch_app_with_install_fallback()
-        self.sleeper(2)
+        self.sleeper(XHS_LAUNCH_SETTLE_SECONDS)
         self._trace("open_discovery_launch_complete")
         self._trace("open_discovery_privacy_tap_start")
         self.tap(*XHS_PRIVACY_CONSENT_TAP)
-        self.sleeper(2)
+        self.sleeper(XHS_DISCOVERY_TAP_SETTLE_SECONDS)
         self._trace("open_discovery_privacy_tap_complete")
         self._trace("open_discovery_capture_start", destination=str(destination))
         output = self.capture_screen(destination)
@@ -345,15 +349,15 @@ class XiaohongshuNavigator:
         self._trace("open_search_force_stop_complete")
         self._trace("open_search_launch_start")
         self.launch_app_with_install_fallback()
-        self.sleeper(2)
+        self.sleeper(XHS_LAUNCH_SETTLE_SECONDS)
         self._trace("open_search_launch_complete")
         self._trace("open_search_privacy_tap_start")
         self.tap(*XHS_PRIVACY_CONSENT_TAP)
-        self.sleeper(1)
+        self.sleeper(XHS_PRIVACY_TAP_SETTLE_SECONDS)
         self._trace("open_search_privacy_tap_complete")
         self._trace("open_search_search_icon_tap_start")
         self.tap(*XHS_SEARCH_ICON_TAP)
-        self.sleeper(2)
+        self.sleeper(XHS_SEARCH_ICON_SETTLE_SECONDS)
         self._trace("open_search_search_icon_tap_complete")
         self._trace("open_search_capture_start", destination=str(destination))
         output = self.capture_screen(destination)
