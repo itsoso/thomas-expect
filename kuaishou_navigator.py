@@ -61,6 +61,10 @@ class KuaishouNavigationError(RuntimeError):
     """Raised when the navigator cannot reach the expected Kuaishou page."""
 
 
+class KuaishouSearchActivityReadyError(KuaishouNavigationError):
+    """Raised when SearchActivity is foregrounded but its UI XML is not yet available."""
+
+
 @dataclass(frozen=True)
 class UiNode:
     resource_id: str
@@ -665,6 +669,8 @@ class KuaishouNavigator:
             try:
                 activity = self.current_activity()
                 self._trace("ensure_search_page.activity_after_start_search_activity_failed", activity=activity)
+                if activity == KUAISHOU_SEARCH_ACTIVITY:
+                    raise KuaishouSearchActivityReadyError("SearchActivity ready after denied launch")
                 if activity == KUAISHOU_HOME_ACTIVITY:
                     self._trace("ensure_search_page.tap_home_search_after_start_search_activity_failed", center=KUAISHOU_SEARCH_TAP)
                     self.tap(*KUAISHOU_SEARCH_TAP)
@@ -677,6 +683,8 @@ class KuaishouNavigator:
                         ui_xml = self._recover_from_search_results_page(ui_xml)
                         if self._can_submit_search_from_ui(ui_xml):
                             return ui_xml
+            except KuaishouSearchActivityReadyError:
+                raise
             except KuaishouNavigationError:
                 pass
 
@@ -808,6 +816,14 @@ class KuaishouNavigator:
                 destination=destination,
                 capture=capture,
                 verify_input_after_adb_keyboard=verify_input_after_adb_keyboard,
+            )
+        except KuaishouSearchActivityReadyError as exc:
+            self._trace("search_keyword.search_activity_ready", error=str(exc))
+            return self._submit_search_on_search_activity_without_ui(
+                keyword=keyword,
+                pinyin=pinyin,
+                destination=destination,
+                capture=capture,
             )
         except KuaishouNavigationError as exc:
             self._trace("search_keyword.error", error=str(exc))

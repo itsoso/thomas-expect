@@ -1744,6 +1744,53 @@ def test_search_keyword_uses_activity_only_search_fallback_when_search_activity_
     assert runner.calls[22]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "keyevent", "66"]
 
 
+def test_search_keyword_uses_activity_only_submit_without_double_activity_probe_when_search_launch_denied(
+    tmp_path: Path,
+) -> None:
+    from kuaishou_navigator import KuaishouNavigator
+
+    installer = FakeInstaller()
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(stdout="UI hierchary dumped to: /sdcard/kuaishou_nav.xml\n"),
+            FakeCompletedProcess(stdout=HOME_FEED_XML),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout="UI hierchary dumped to: /sdcard/kuaishou_nav.xml\n"),
+            FakeCompletedProcess(stdout=HOME_FEED_XML),
+            FakeCompletedProcess(returncode=255, stderr="SecurityException"),
+            FakeCompletedProcess(stdout=SEARCH_ACTIVITY_OUTPUT),
+            FakeCompletedProcess(stdout=NO_ADB_KEYBOARD_LIST_OUTPUT),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=b"PNGDATA"),
+        ]
+    )
+
+    navigator = KuaishouNavigator(
+        serial="deec9116",
+        installer=installer,
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    written = navigator.search_keyword(
+        keyword="直播带货",
+        pinyin="zhibodaihuo",
+        destination=tmp_path / "result.png",
+    )
+
+    assert written == tmp_path / "result.png"
+    dumpsys_calls = [
+        call["cmd"]
+        for call in runner.calls
+        if call["cmd"] == ["adb", "-s", "deec9116", "shell", "dumpsys", "activity", "activities"]
+    ]
+    assert dumpsys_calls == [["adb", "-s", "deec9116", "shell", "dumpsys", "activity", "activities"]]
+    assert runner.calls[7]["cmd"] == ["adb", "-s", "deec9116", "shell", "ime", "list", "-a"]
+    assert runner.calls[10]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "keyevent", "66"]
+
+
 def test_open_live_results_taps_live_tab_and_captures_screen(tmp_path: Path) -> None:
     from kuaishou_navigator import KuaishouNavigator
 
