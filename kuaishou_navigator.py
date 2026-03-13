@@ -26,6 +26,8 @@ KUAISHOU_LIVE_ENTRY_POPUP_CLOSE_TAP = (930, 1030)
 KUAISHOU_UI_DUMP_PATH = "/sdcard/kuaishou_nav.xml"
 KUAISHOU_CAPTURE_PATH = "/sdcard/kuaishou_capture.png"
 KUAISHOU_CAPTURE_RETRY_DELAY_SECONDS = 0.0
+KUAISHOU_ENTER_LIVE_SETTLE_SECONDS = 2.0
+KUAISHOU_LIVE_POPUP_DISMISS_SETTLE_SECONDS = 0.5
 KUAISHOU_EDITOR_ID = "com.smile.gifmaker:id/editor"
 KUAISHOU_SEARCH_RESULT_TEXT_ID = "com.smile.gifmaker:id/search_result_text"
 KUAISHOU_CLEAR_ID = "com.smile.gifmaker:id/clear_layout"
@@ -835,10 +837,10 @@ class KuaishouNavigator:
     def enter_first_live_room(self, destination: str | Path, *, capture: bool = True) -> Path:
         self._trace("enter_first_live_room_start", destination=destination)
         self.tap(*KUAISHOU_FIRST_LIVE_RESULT_TAP)
-        self.sleeper(3)
+        self.sleeper(KUAISHOU_ENTER_LIVE_SETTLE_SECONDS)
         self._trace("dismiss_live_entry_popup", center=KUAISHOU_LIVE_ENTRY_POPUP_CLOSE_TAP)
         self.tap(*KUAISHOU_LIVE_ENTRY_POPUP_CLOSE_TAP)
-        self.sleeper(1)
+        self.sleeper(KUAISHOU_LIVE_POPUP_DISMISS_SETTLE_SECONDS)
         self._trace("enter_first_live_room_complete", destination=destination)
         if not capture:
             return Path(destination)

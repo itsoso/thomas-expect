@@ -1774,6 +1774,7 @@ def test_open_live_results_taps_live_tab_and_captures_screen(tmp_path: Path) -> 
 def test_enter_first_live_room_taps_first_card_and_captures_screen(tmp_path: Path) -> None:
     from kuaishou_navigator import KuaishouNavigator
 
+    sleeps: list[float] = []
     runner = RecordingRunner(
         [
             FakeCompletedProcess(),
@@ -1786,7 +1787,7 @@ def test_enter_first_live_room_taps_first_card_and_captures_screen(tmp_path: Pat
         serial="deec9116",
         installer=FakeInstaller(),
         runner=runner,
-        sleeper=lambda _seconds: None,
+        sleeper=sleeps.append,
     )
 
     target = tmp_path / "kuaishou-live-room.png"
@@ -1798,6 +1799,7 @@ def test_enter_first_live_room_taps_first_card_and_captures_screen(tmp_path: Pat
     assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "930", "1030"]
     assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
     assert runner.calls[2]["text"] is False
+    assert sleeps == [2.0, 0.5]
 
 
 def test_search_and_enter_first_live_room_runs_full_public_live_flow(tmp_path: Path) -> None:
