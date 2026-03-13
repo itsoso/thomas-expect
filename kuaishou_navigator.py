@@ -156,6 +156,14 @@ class KuaishouNavigator:
             return False
         return result.returncode == -15 or any(marker in combined_output for marker in TRANSIENT_ADB_ERRORS)
 
+    @classmethod
+    def _is_blank_terminated_result(cls, result: subprocess.CompletedProcess) -> bool:
+        return (
+            result.returncode == -15
+            and cls._decode_output(result.stdout).strip() == ""
+            and cls._decode_output(result.stderr).strip() == ""
+        )
+
     def _build_command(self, *args: str) -> list[str]:
         command = [self.adb_path]
         if self.serial:
@@ -231,6 +239,8 @@ class KuaishouNavigator:
                     return last_result
             if not self._is_transient_adb_error(last_result) or attempt == retries:
                 return last_result
+            if self._is_blank_terminated_result(last_result):
+                continue
             wait_command = self._build_command("wait-for-device")
             wait_result = self.runner(
                 wait_command,
@@ -609,6 +619,33 @@ class KuaishouNavigator:
                 if self._can_submit_search_from_ui(ui_xml):
                     return ui_xml
 
+        search_btn = self.maybe_find_node(ui_xml, KUAISHOU_HOME_SEARCH_BUTTON_ID)
+        if search_btn is not None:
+            self._trace("ensure_search_page.tap_home_search", center=search_btn.center)
+            self.tap(*search_btn.center)
+            self.sleeper(2)
+            ui_xml = self.dump_ui_xml()
+            self._trace_ui_state("after_tap_home_search", ui_xml)
+            if self._can_submit_search_from_ui(ui_xml):
+                return ui_xml
+            if self._is_search_results_page(ui_xml):
+                ui_xml = self._recover_from_search_results_page(ui_xml)
+                if self._can_submit_search_from_ui(ui_xml):
+                    return ui_xml
+
+        if self._is_home_feed_page(ui_xml):
+            self._trace("ensure_search_page.tap_home_search_hotspot", center=KUAISHOU_SEARCH_TAP)
+            self.tap(*KUAISHOU_SEARCH_TAP)
+            self.sleeper(2)
+            ui_xml = self.dump_ui_xml()
+            self._trace_ui_state("after_tap_home_search_hotspot", ui_xml)
+            if self._can_submit_search_from_ui(ui_xml):
+                return ui_xml
+            if self._is_search_results_page(ui_xml):
+                ui_xml = self._recover_from_search_results_page(ui_xml)
+                if self._can_submit_search_from_ui(ui_xml):
+                    return ui_xml
+
         self._trace("ensure_search_page.start_search_activity", activity=KUAISHOU_SEARCH_ACTIVITY)
         try:
             self.start_search_activity()
@@ -641,33 +678,6 @@ class KuaishouNavigator:
             except KuaishouNavigationError:
                 pass
 
-        search_btn = self.maybe_find_node(ui_xml, KUAISHOU_HOME_SEARCH_BUTTON_ID)
-        if search_btn is not None:
-            self._trace("ensure_search_page.tap_home_search", center=search_btn.center)
-            self.tap(*search_btn.center)
-            self.sleeper(2)
-            ui_xml = self.dump_ui_xml()
-            self._trace_ui_state("after_tap_home_search", ui_xml)
-            if self._can_submit_search_from_ui(ui_xml):
-                return ui_xml
-            if self._is_search_results_page(ui_xml):
-                ui_xml = self._recover_from_search_results_page(ui_xml)
-                if self._can_submit_search_from_ui(ui_xml):
-                    return ui_xml
-
-        if self._is_home_feed_page(ui_xml):
-            self._trace("ensure_search_page.tap_home_search_hotspot", center=KUAISHOU_SEARCH_TAP)
-            self.tap(*KUAISHOU_SEARCH_TAP)
-            self.sleeper(2)
-            ui_xml = self.dump_ui_xml()
-            self._trace_ui_state("after_tap_home_search_hotspot", ui_xml)
-            if self._can_submit_search_from_ui(ui_xml):
-                return ui_xml
-            if self._is_search_results_page(ui_xml):
-                ui_xml = self._recover_from_search_results_page(ui_xml)
-                if self._can_submit_search_from_ui(ui_xml):
-                    return ui_xml
-
         raise KuaishouNavigationError("Could not reach 快手搜索页 from the current app state")
 
     def _submit_search_on_search_page(
@@ -678,6 +688,7 @@ class KuaishouNavigator:
         destination: str | Path,
         *,
         capture: bool = True,
+        verify_input_after_adb_keyboard: bool = True,
     ) -> Path:
         _ = keyword  # Reserved for future result-page assertions.
         clear_node = self.maybe_find_node(ui_xml, KUAISHOU_CLEAR_ID)
@@ -706,25 +717,26 @@ class KuaishouNavigator:
                 self.sleeper(0.5)
             input_strategy = self.input_keyword(keyword=keyword, pinyin=pinyin)
             if input_strategy == "adb_keyboard":
-                try:
-                    verified_ui = self.dump_ui_xml()
-                except KuaishouNavigationError as exc:
-                    self._trace("search_keyword.skip_ui_verification_after_adb_keyboard", error=str(exc))
-                else:
-                    observed_keyword = self._current_search_text(verified_ui)
-                    if observed_keyword != keyword:
-                        self._trace(
-                            "search_keyword.retry_with_pinyin",
-                            expected=keyword,
-                            observed=observed_keyword,
-                        )
-                        retry_clear_node = self.maybe_find_node(verified_ui, KUAISHOU_CLEAR_ID)
-                        if retry_clear_node is not None:
-                            self.tap(*retry_clear_node.center)
+                if verify_input_after_adb_keyboard:
+                    try:
+                        verified_ui = self.dump_ui_xml()
+                    except KuaishouNavigationError as exc:
+                        self._trace("search_keyword.skip_ui_verification_after_adb_keyboard", error=str(exc))
+                    else:
+                        observed_keyword = self._current_search_text(verified_ui)
+                        if observed_keyword != keyword:
+                            self._trace(
+                                "search_keyword.retry_with_pinyin",
+                                expected=keyword,
+                                observed=observed_keyword,
+                            )
+                            retry_clear_node = self.maybe_find_node(verified_ui, KUAISHOU_CLEAR_ID)
+                            if retry_clear_node is not None:
+                                self.tap(*retry_clear_node.center)
+                                self.sleeper(0.5)
+                            self.input_text(pinyin)
                             self.sleeper(0.5)
-                        self.input_text(pinyin)
-                        self.sleeper(0.5)
-                        self.keyevent(62)
+                            self.keyevent(62)
         self.sleeper(0.5)
         self.tap(*search_button.center)
         self.sleeper(2)
@@ -761,6 +773,7 @@ class KuaishouNavigator:
         destination: str | Path,
         *,
         capture: bool = True,
+        verify_input_after_adb_keyboard: bool = True,
     ) -> Path:
         self.installer.ensure_app(KNOWN_APPS["kuaishou"], launch_after_install=True)
         self.sleeper(2)
@@ -771,6 +784,7 @@ class KuaishouNavigator:
             pinyin=pinyin,
             destination=destination,
             capture=capture,
+            verify_input_after_adb_keyboard=verify_input_after_adb_keyboard,
         )
 
     def search_keyword(
@@ -780,6 +794,7 @@ class KuaishouNavigator:
         destination: str | Path,
         *,
         capture: bool = True,
+        verify_input_after_adb_keyboard: bool = True,
     ) -> Path:
         self._trace("search_keyword.start", keyword=keyword, pinyin=pinyin, destination=destination)
         try:
@@ -790,6 +805,7 @@ class KuaishouNavigator:
                 pinyin=pinyin,
                 destination=destination,
                 capture=capture,
+                verify_input_after_adb_keyboard=verify_input_after_adb_keyboard,
             )
         except KuaishouNavigationError as exc:
             self._trace("search_keyword.error", error=str(exc))
@@ -834,7 +850,13 @@ class KuaishouNavigator:
         pinyin: str,
         destination: str | Path,
     ) -> Path:
-        self.search_keyword(keyword=keyword, pinyin=pinyin, destination=destination, capture=False)
+        self.search_keyword(
+            keyword=keyword,
+            pinyin=pinyin,
+            destination=destination,
+            capture=False,
+            verify_input_after_adb_keyboard=False,
+        )
         self.open_live_results(destination, capture=False)
         return self.enter_first_live_room(destination, capture=True)
 
