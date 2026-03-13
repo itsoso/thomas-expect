@@ -45,9 +45,16 @@ class RecordingRunner:
 class FakeInstaller:
     def __init__(self) -> None:
         self.calls: list[tuple[str, bool]] = []
+        self.launch_calls: list[tuple[str, str | None]] = []
+        self.launch_failures: list[Exception] = []
 
     def ensure_app(self, spec, launch_after_install: bool = True, **_kwargs):
         self.calls.append((spec.package_name, launch_after_install))
+
+    def launch_app(self, package_name: str, launcher_activity: str | None = None):
+        self.launch_calls.append((package_name, launcher_activity))
+        if self.launch_failures:
+            raise self.launch_failures.pop(0)
 
 
 ADB_KEYBOARD_LIST_OUTPUT = """\
@@ -216,7 +223,8 @@ def test_open_search_launches_douyin_and_captures_search_page(tmp_path: Path) ->
 
     assert written == target
     assert target.read_bytes() == b"PNGDATA"
-    assert installer.calls == [("com.ss.android.ugc.aweme", True)]
+    assert installer.calls == []
+    assert installer.launch_calls == [("com.ss.android.ugc.aweme", None)]
     assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "shell", "uiautomator", "dump", "/sdcard/douyin_nav.xml"]
     assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "cat", "/sdcard/douyin_nav.xml"]
     assert runner.calls[1]["text"] is False
@@ -227,6 +235,43 @@ def test_open_search_launches_douyin_and_captures_search_page(tmp_path: Path) ->
     assert runner.calls[6]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
     assert runner.calls[6]["text"] is False
     assert len(runner.calls) == 7
+
+
+def test_open_search_falls_back_to_install_check_when_direct_launch_fails(tmp_path: Path) -> None:
+    from douyin_navigator import DouyinNavigator
+    from mobile_app_installer import AppInstallError
+
+    installer = FakeInstaller()
+    installer.launch_failures = [AppInstallError("launch failed")]
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(stdout=SEARCH_PAGE_XML_WITH_EXISTING_TEXT),
+            FakeCompletedProcess(stdout=SEARCH_PAGE_XML_WITH_EXISTING_TEXT),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=b"PNGDATA"),
+        ]
+    )
+
+    navigator = DouyinNavigator(
+        serial="deec9116",
+        installer=installer,
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    target = tmp_path / "douyin-search-fallback.png"
+    written = navigator.open_search(target)
+
+    assert written == target
+    assert target.read_bytes() == b"PNGDATA"
+    assert installer.calls == [("com.ss.android.ugc.aweme", False)]
+    assert installer.launch_calls == [
+        ("com.ss.android.ugc.aweme", None),
+        ("com.ss.android.ugc.aweme", None),
+    ]
 
 
 def test_capture_screen_prefers_direct_exec_out_strategy(tmp_path: Path) -> None:

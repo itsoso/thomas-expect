@@ -11,7 +11,7 @@ import time
 from typing import Callable
 import xml.etree.ElementTree as ET
 
-from mobile_app_installer import AndroidAppInstaller, KNOWN_APPS
+from mobile_app_installer import AndroidAppInstaller, AppInstallError, KNOWN_APPS
 
 
 Runner = Callable[..., subprocess.CompletedProcess]
@@ -44,6 +44,10 @@ UI_DUMP_SUCCESS_MARKERS = (
     "ui hierarchy dumped to:",
 )
 DELETE_TEXT_BATCH_SIZE = 12
+DOUYIN_LAUNCH_SETTLE_SECONDS = 0.5
+DOUYIN_PRIVACY_TAP_SETTLE_SECONDS = 0.2
+DOUYIN_POST_SWIPE_SETTLE_SECONDS = 0.2
+DOUYIN_SEARCH_ICON_SETTLE_SECONDS = 0.5
 
 
 class DouyinNavigationError(RuntimeError):
@@ -133,7 +137,7 @@ class DouyinNavigator:
         *args: str,
         text: bool = True,
         retries: int = 2,
-        retry_delay_seconds: float = 1.0,
+        retry_delay_seconds: float = 0.0,
         timeout_seconds: float | None = None,
         accept_partial_bytes_prefix: bytes | None = None,
     ) -> subprocess.CompletedProcess:
@@ -539,21 +543,30 @@ class DouyinNavigator:
         self.sleeper(0.5)
         self.keyevent(62)
 
+    def launch_app_with_install_fallback(self) -> None:
+        try:
+            self.installer.launch_app(KNOWN_APPS["douyin"].package_name)
+            return
+        except AppInstallError as exc:
+            self._trace("launch_app_fallback_to_install", error=str(exc))
+        self.installer.ensure_app(KNOWN_APPS["douyin"], launch_after_install=False)
+        self.installer.launch_app(KNOWN_APPS["douyin"].package_name)
+
     def _open_search_flow(self) -> None:
-        self.installer.ensure_app(KNOWN_APPS["douyin"], launch_after_install=True)
-        self.sleeper(2)
+        self.launch_app_with_install_fallback()
+        self.sleeper(DOUYIN_LAUNCH_SETTLE_SECONDS)
         try:
             self.dismiss_permission_prompt_if_present(self.dump_ui_xml())
         except DouyinNavigationError:
             pass
         self.tap(*DOUYIN_PRIVACY_CONSENT_TAP)
-        self.sleeper(1)
+        self.sleeper(DOUYIN_PRIVACY_TAP_SETTLE_SECONDS)
         self.swipe(DOUYIN_FEED_SWIPE_START, DOUYIN_FEED_SWIPE_END, 250)
-        self.sleeper(0.5)
+        self.sleeper(DOUYIN_POST_SWIPE_SETTLE_SECONDS)
         self.swipe(DOUYIN_FEED_SWIPE_START, DOUYIN_FEED_SWIPE_END, 250)
-        self.sleeper(0.5)
+        self.sleeper(DOUYIN_POST_SWIPE_SETTLE_SECONDS)
         self.tap(*DOUYIN_SEARCH_ICON_TAP)
-        self.sleeper(1)
+        self.sleeper(DOUYIN_SEARCH_ICON_SETTLE_SECONDS)
 
     def open_search(self, destination: str | Path) -> Path:
         self._open_search_flow()
