@@ -11,7 +11,7 @@ import time
 from typing import Callable
 import xml.etree.ElementTree as ET
 
-from mobile_app_installer import AndroidAppInstaller, KNOWN_APPS
+from mobile_app_installer import AndroidAppInstaller, AppInstallError, KNOWN_APPS
 
 
 Runner = Callable[..., subprocess.CompletedProcess]
@@ -50,6 +50,8 @@ UI_DUMP_SUCCESS_MARKERS = (
     "ui hierarchy dumped to:",
 )
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+KUAISHOU_LAUNCH_SETTLE_SECONDS = 0.5
+KUAISHOU_SEARCH_TAP_SETTLE_SECONDS = 0.5
 
 
 class KuaishouNavigationError(RuntimeError):
@@ -165,7 +167,7 @@ class KuaishouNavigator:
         *args: str,
         text: bool = True,
         retries: int = 2,
-        retry_delay_seconds: float = 1.0,
+        retry_delay_seconds: float = 0.0,
         timeout_seconds: float | None = None,
         accept_partial_bytes_prefix: bytes | None = None,
     ) -> subprocess.CompletedProcess:
@@ -483,14 +485,24 @@ class KuaishouNavigator:
         result = self._run("shell", "ls", "-l", path, retries=2, retry_delay_seconds=1.0)
         return result.returncode == 0 and bool(self._decode_output(result.stdout).strip())
 
+    def launch_app_with_install_fallback(self) -> None:
+        package_name = KNOWN_APPS["kuaishou"].package_name
+        try:
+            self.installer.launch_app(package_name)
+            return
+        except AppInstallError as exc:
+            self._trace("launch_app_fallback_to_install", error=str(exc))
+        self.installer.ensure_app(KNOWN_APPS["kuaishou"], launch_after_install=False)
+        self.installer.launch_app(package_name)
+
     def open_search(self, destination: str | Path) -> Path:
-        self.installer.ensure_app(KNOWN_APPS["kuaishou"], launch_after_install=True)
-        self.sleeper(2)
+        self.launch_app_with_install_fallback()
+        self.sleeper(KUAISHOU_LAUNCH_SETTLE_SECONDS)
         activity = self.current_activity()
         if activity != KUAISHOU_HOME_ACTIVITY:
             raise KuaishouNavigationError(f"Expected 快手首页, got {activity}")
         self.tap(*KUAISHOU_SEARCH_TAP)
-        self.sleeper(2)
+        self.sleeper(KUAISHOU_SEARCH_TAP_SETTLE_SECONDS)
         return self.capture_screen(destination)
 
     def _is_search_page(self, ui_xml: str) -> bool:

@@ -249,11 +249,51 @@ def test_open_search_launches_app_taps_search_and_writes_screenshot(tmp_path: Pa
 
     assert written == target
     assert target.read_bytes() == b"PNGDATA"
-    assert installer.calls == [("com.smile.gifmaker", True)]
+    assert installer.calls == []
+    assert installer.launch_calls == ["com.smile.gifmaker"]
     assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "shell", "dumpsys", "activity", "activities"]
     assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1186", "223"]
     assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
     assert runner.calls[2]["text"] is False
+
+
+def test_open_search_falls_back_to_install_check_when_direct_launch_fails(tmp_path: Path) -> None:
+    from kuaishou_navigator import KuaishouNavigator
+    from mobile_app_installer import AppInstallError
+
+    installer = FakeInstaller()
+    failed_once = False
+
+    def launch_once_then_succeed(package_name: str) -> None:
+        nonlocal failed_once
+        installer.launch_calls.append(package_name)
+        if not failed_once:
+            failed_once = True
+            raise AppInstallError("launch failed")
+
+    installer.launch_app = launch_once_then_succeed  # type: ignore[method-assign]
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(stdout=HOME_ACTIVITY_OUTPUT),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=b"PNGDATA"),
+        ]
+    )
+
+    navigator = KuaishouNavigator(
+        serial="deec9116",
+        installer=installer,
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    target = tmp_path / "search-fallback.png"
+    written = navigator.open_search(target)
+
+    assert written == target
+    assert target.read_bytes() == b"PNGDATA"
+    assert installer.calls == [("com.smile.gifmaker", False)]
+    assert installer.launch_calls == ["com.smile.gifmaker", "com.smile.gifmaker"]
 
 
 def test_capture_screen_retries_when_first_screencap_is_empty(tmp_path: Path) -> None:
