@@ -202,8 +202,6 @@ def test_open_search_launches_douyin_and_captures_search_page(tmp_path: Path) ->
     runner = RecordingRunner(
         [
             FakeCompletedProcess(),
-            FakeCompletedProcess(stdout=SEARCH_PAGE_XML_WITH_EXISTING_TEXT),
-            FakeCompletedProcess(),
             FakeCompletedProcess(),
             FakeCompletedProcess(),
             FakeCompletedProcess(),
@@ -225,16 +223,13 @@ def test_open_search_launches_douyin_and_captures_search_page(tmp_path: Path) ->
     assert target.read_bytes() == b"PNGDATA"
     assert installer.calls == []
     assert installer.launch_calls == [("com.ss.android.ugc.aweme", None)]
-    assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "shell", "uiautomator", "dump", "/sdcard/douyin_nav.xml"]
-    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "cat", "/sdcard/douyin_nav.xml"]
-    assert runner.calls[1]["text"] is False
-    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "640", "2000"]
-    assert runner.calls[3]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "swipe", "640", "2300", "640", "1000", "250"]
-    assert runner.calls[4]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "swipe", "640", "2300", "640", "1000", "250"]
-    assert runner.calls[5]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1188", "223"]
-    assert runner.calls[6]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
-    assert runner.calls[6]["text"] is False
-    assert len(runner.calls) == 7
+    assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "640", "2000"]
+    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "swipe", "640", "2300", "640", "1000", "250"]
+    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "swipe", "640", "2300", "640", "1000", "250"]
+    assert runner.calls[3]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1188", "223"]
+    assert runner.calls[4]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
+    assert runner.calls[4]["text"] is False
+    assert len(runner.calls) == 5
 
 
 def test_open_search_falls_back_to_install_check_when_direct_launch_fails(tmp_path: Path) -> None:
@@ -245,8 +240,6 @@ def test_open_search_falls_back_to_install_check_when_direct_launch_fails(tmp_pa
     installer.launch_failures = [AppInstallError("launch failed")]
     runner = RecordingRunner(
         [
-            FakeCompletedProcess(stdout=SEARCH_PAGE_XML_WITH_EXISTING_TEXT),
-            FakeCompletedProcess(stdout=SEARCH_PAGE_XML_WITH_EXISTING_TEXT),
             FakeCompletedProcess(),
             FakeCompletedProcess(),
             FakeCompletedProcess(),
@@ -343,6 +336,54 @@ def test_capture_screen_falls_back_to_device_file_when_direct_exec_out_fails(tmp
     ]
     assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "cat", "/sdcard/douyin_capture.png"]
     assert runner.calls[3]["cmd"] == ["adb", "-s", "deec9116", "shell", "rm", "-f", "/sdcard/douyin_capture.png"]
+
+
+def test_capture_screen_via_device_file_uses_zero_delay_retries(tmp_path: Path) -> None:
+    from douyin_navigator import DouyinNavigator
+
+    navigator = DouyinNavigator(
+        serial="deec9116",
+        installer=FakeInstaller(),
+        runner=RecordingRunner([]),
+        sleeper=lambda _seconds: None,
+    )
+
+    responses = [
+        FakeCompletedProcess(),
+        FakeCompletedProcess(stdout=b"PNGDATA"),
+        FakeCompletedProcess(),
+    ]
+    recorded: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def fake_run(*args: str, **kwargs):
+        recorded.append((args, kwargs))
+        if not responses:
+            raise AssertionError(f"Missing fake response for command: {args}")
+        return responses.pop(0)
+
+    navigator._run = fake_run  # type: ignore[method-assign]
+
+    target = tmp_path / "douyin-fast-fallback.png"
+    written = navigator.capture_screen_via_device_file(target)
+
+    assert written == target
+    assert target.read_bytes() == b"PNGDATA"
+    assert recorded == [
+        (
+            ("shell", "screencap", "-p", "/sdcard/douyin_capture.png"),
+            {"retries": 5, "retry_delay_seconds": 0.0},
+        ),
+        (
+            ("exec-out", "cat", "/sdcard/douyin_capture.png"),
+            {
+                "text": False,
+                "retries": 5,
+                "retry_delay_seconds": 0.0,
+                "accept_partial_bytes_prefix": b"\x89PNG",
+            },
+        ),
+        (("shell", "rm", "-f", "/sdcard/douyin_capture.png"), {"retries": 0}),
+    ]
 
 
 def test_capture_screen_retries_after_timeout_then_succeeds_directly(tmp_path: Path) -> None:

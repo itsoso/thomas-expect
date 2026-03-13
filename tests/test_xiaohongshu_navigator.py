@@ -293,6 +293,47 @@ def test_capture_screen_falls_back_to_device_file_when_direct_capture_keeps_fail
     assert runner.calls[2]["text"] is False
 
 
+def test_capture_screen_via_device_file_uses_zero_delay_retries(tmp_path: Path) -> None:
+    from xiaohongshu_navigator import XiaohongshuNavigator
+
+    navigator = XiaohongshuNavigator(
+        serial="deec9116",
+        installer=FakeInstaller(),
+        runner=RecordingRunner([]),
+        sleeper=lambda _seconds: None,
+    )
+
+    responses = [
+        FakeCompletedProcess(),
+        FakeCompletedProcess(stdout=b"\x89PNGDATA"),
+    ]
+    recorded: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def fake_run(*args: str, **kwargs):
+        recorded.append((args, kwargs))
+        if not responses:
+            raise AssertionError(f"Missing fake response for command: {args}")
+        return responses.pop(0)
+
+    navigator._run = fake_run  # type: ignore[method-assign]
+
+    target = tmp_path / "xhs-fast-fallback.png"
+    written = navigator.capture_screen_via_device_file(target)
+
+    assert written == target
+    assert target.read_bytes() == b"\x89PNGDATA"
+    assert recorded == [
+        (
+            ("shell", "screencap", "-p", "/sdcard/xhs_nav.png"),
+            {"text": True, "retries": 5, "retry_delay_seconds": 0.0},
+        ),
+        (
+            ("exec-out", "cat", "/sdcard/xhs_nav.png"),
+            {"text": False, "retries": 5, "retry_delay_seconds": 0.0},
+        ),
+    ]
+
+
 def test_enter_first_feed_note_taps_first_note_card_and_captures_screen(tmp_path: Path) -> None:
     from xiaohongshu_navigator import XiaohongshuNavigator
 

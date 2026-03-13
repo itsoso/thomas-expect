@@ -64,8 +64,9 @@ class FakeKuaishouNavigator:
 class FakeXiaohongshuNavigator:
     instances: list["FakeXiaohongshuNavigator"] = []
 
-    def __init__(self, serial: str | None = None, **_kwargs) -> None:
+    def __init__(self, serial: str | None = None, trace_dir: str | Path | None = None, **_kwargs) -> None:
         self.serial = serial
+        self.trace_dir = None if trace_dir is None else str(trace_dir)
         self.calls: list[tuple[str, tuple[object, ...]]] = []
         type(self).instances.append(self)
 
@@ -207,6 +208,7 @@ def test_router_routes_xiaohongshu_open_first_result(tmp_path: Path) -> None:
     )
 
     target = tmp_path / "xhs-note.png"
+    trace_dir = tmp_path / "trace"
     written = router.execute(
         PublicBrowseRequest(
             platform="xiaohongshu",
@@ -214,6 +216,7 @@ def test_router_routes_xiaohongshu_open_first_result(tmp_path: Path) -> None:
             query="hanfu",
             output=target,
             serial="device-3",
+            trace_dir=trace_dir,
         )
     )
 
@@ -221,6 +224,7 @@ def test_router_routes_xiaohongshu_open_first_result(tmp_path: Path) -> None:
     assert target.read_bytes() == b"XHS-NOTE"
     assert len(FakeXiaohongshuNavigator.instances) == 1
     assert FakeXiaohongshuNavigator.instances[0].serial == "device-3"
+    assert FakeXiaohongshuNavigator.instances[0].trace_dir == str(trace_dir)
     assert FakeXiaohongshuNavigator.instances[0].calls == [
         ("search_and_open_first_note", ("hanfu", str(target)))
     ]

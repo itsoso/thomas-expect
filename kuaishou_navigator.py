@@ -25,6 +25,7 @@ KUAISHOU_FIRST_LIVE_RESULT_TAP = (420, 960)
 KUAISHOU_LIVE_ENTRY_POPUP_CLOSE_TAP = (930, 1030)
 KUAISHOU_UI_DUMP_PATH = "/sdcard/kuaishou_nav.xml"
 KUAISHOU_CAPTURE_PATH = "/sdcard/kuaishou_capture.png"
+KUAISHOU_CAPTURE_RETRY_DELAY_SECONDS = 0.0
 KUAISHOU_EDITOR_ID = "com.smile.gifmaker:id/editor"
 KUAISHOU_SEARCH_RESULT_TEXT_ID = "com.smile.gifmaker:id/search_result_text"
 KUAISHOU_CLEAR_ID = "com.smile.gifmaker:id/clear_layout"
@@ -436,7 +437,7 @@ class KuaishouNavigator:
                 "-p",
                 text=False,
                 retries=5,
-                retry_delay_seconds=2.0,
+                retry_delay_seconds=KUAISHOU_CAPTURE_RETRY_DELAY_SECONDS,
                 accept_partial_bytes_prefix=PNG_SIGNATURE,
             )
             payload = direct_result.stdout or b""
@@ -457,7 +458,7 @@ class KuaishouNavigator:
             "-p",
             KUAISHOU_CAPTURE_PATH,
             retries=5,
-            retry_delay_seconds=2.0,
+            retry_delay_seconds=KUAISHOU_CAPTURE_RETRY_DELAY_SECONDS,
         )
         if capture_result.returncode != 0 and not self._device_file_exists(KUAISHOU_CAPTURE_PATH):
             raise KuaishouNavigationError(self._decode_output(capture_result.stderr) or "Fallback screenshot failed")
@@ -467,7 +468,7 @@ class KuaishouNavigator:
             KUAISHOU_CAPTURE_PATH,
             text=False,
             retries=5,
-            retry_delay_seconds=2.0,
+            retry_delay_seconds=KUAISHOU_CAPTURE_RETRY_DELAY_SECONDS,
             accept_partial_bytes_prefix=PNG_SIGNATURE,
         )
         payload = read_result.stdout or b""
@@ -482,7 +483,7 @@ class KuaishouNavigator:
         return target
 
     def _device_file_exists(self, path: str) -> bool:
-        result = self._run("shell", "ls", "-l", path, retries=2, retry_delay_seconds=1.0)
+        result = self._run("shell", "ls", "-l", path, retries=2, retry_delay_seconds=KUAISHOU_CAPTURE_RETRY_DELAY_SECONDS)
         return result.returncode == 0 and bool(self._decode_output(result.stdout).strip())
 
     def launch_app_with_install_fallback(self) -> None:
@@ -498,11 +499,15 @@ class KuaishouNavigator:
     def open_search(self, destination: str | Path) -> Path:
         self.launch_app_with_install_fallback()
         self.sleeper(KUAISHOU_LAUNCH_SETTLE_SECONDS)
-        activity = self.current_activity()
-        if activity != KUAISHOU_HOME_ACTIVITY:
-            raise KuaishouNavigationError(f"Expected 快手首页, got {activity}")
-        self.tap(*KUAISHOU_SEARCH_TAP)
-        self.sleeper(KUAISHOU_SEARCH_TAP_SETTLE_SECONDS)
+        try:
+            self.start_search_activity()
+            self.sleeper(KUAISHOU_SEARCH_TAP_SETTLE_SECONDS)
+        except KuaishouNavigationError:
+            activity = self.current_activity()
+            if activity != KUAISHOU_HOME_ACTIVITY:
+                raise KuaishouNavigationError(f"Expected 快手首页, got {activity}")
+            self.tap(*KUAISHOU_SEARCH_TAP)
+            self.sleeper(KUAISHOU_SEARCH_TAP_SETTLE_SECONDS)
         return self.capture_screen(destination)
 
     def _is_search_page(self, ui_xml: str) -> bool:

@@ -21,6 +21,7 @@ XHS_FIRST_SUGGESTION_TAP = (180, 360)
 XHS_FIRST_FEED_NOTE_TAP = (970, 640)
 XHS_FIRST_SEARCH_NOTE_TAP = (250, 760)
 XHS_CAPTURE_PATH = "/sdcard/xhs_nav.png"
+XHS_CAPTURE_RETRY_DELAY_SECONDS = 0.0
 ADB_KEYBOARD_IME = "com.android.adbkeyboard/.AdbIME"
 ADB_KEYBOARD_B64_ACTION = "ADB_INPUT_B64"
 DELETE_TEXT_BATCH_SIZE = 12
@@ -301,7 +302,7 @@ class XiaohongshuNavigator:
             XHS_CAPTURE_PATH,
             text=True,
             retries=5,
-            retry_delay_seconds=2.0,
+            retry_delay_seconds=XHS_CAPTURE_RETRY_DELAY_SECONDS,
         )
         if capture_result.returncode != 0:
             raise XiaohongshuNavigationError(
@@ -314,7 +315,7 @@ class XiaohongshuNavigator:
             XHS_CAPTURE_PATH,
             text=False,
             retries=5,
-            retry_delay_seconds=2.0,
+            retry_delay_seconds=XHS_CAPTURE_RETRY_DELAY_SECONDS,
         )
         payload = read_result.stdout or b""
         if isinstance(payload, str):

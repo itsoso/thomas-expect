@@ -220,19 +220,15 @@ def test_current_activity_reads_resumed_activity_line() -> None:
     assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "shell", "dumpsys", "activity", "activities"]
 
 
-def test_open_search_launches_app_taps_search_and_writes_screenshot(tmp_path: Path) -> None:
+def test_open_search_launches_app_starts_search_activity_and_writes_screenshot(tmp_path: Path) -> None:
     from kuaishou_navigator import KuaishouNavigator
 
     installer = FakeInstaller()
     runner = RecordingRunner(
         [
             FakeCompletedProcess(
-                stdout=(
-                    "  ResumedActivity: ActivityRecord{123 u0 "
-                    "com.smile.gifmaker/com.yxcorp.gifshow.HomeActivity t61}\n"
-                )
+                stdout="Status: ok\nActivity: com.smile.gifmaker/com.yxcorp.plugin.search.SearchActivity\n"
             ),
-            FakeCompletedProcess(),
             FakeCompletedProcess(stdout=b"PNGDATA"),
         ]
     )
@@ -251,10 +247,19 @@ def test_open_search_launches_app_taps_search_and_writes_screenshot(tmp_path: Pa
     assert target.read_bytes() == b"PNGDATA"
     assert installer.calls == []
     assert installer.launch_calls == ["com.smile.gifmaker"]
-    assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "shell", "dumpsys", "activity", "activities"]
-    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1186", "223"]
-    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
-    assert runner.calls[2]["text"] is False
+    assert runner.calls[0]["cmd"] == [
+        "adb",
+        "-s",
+        "deec9116",
+        "shell",
+        "am",
+        "start",
+        "-W",
+        "-n",
+        "com.smile.gifmaker/com.yxcorp.plugin.search.SearchActivity",
+    ]
+    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
+    assert runner.calls[1]["text"] is False
 
 
 def test_open_search_falls_back_to_install_check_when_direct_launch_fails(tmp_path: Path) -> None:
@@ -274,8 +279,7 @@ def test_open_search_falls_back_to_install_check_when_direct_launch_fails(tmp_pa
     installer.launch_app = launch_once_then_succeed  # type: ignore[method-assign]
     runner = RecordingRunner(
         [
-            FakeCompletedProcess(stdout=HOME_ACTIVITY_OUTPUT),
-            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout="Status: ok\nActivity: com.smile.gifmaker/com.yxcorp.plugin.search.SearchActivity\n"),
             FakeCompletedProcess(stdout=b"PNGDATA"),
         ]
     )
@@ -294,6 +298,47 @@ def test_open_search_falls_back_to_install_check_when_direct_launch_fails(tmp_pa
     assert target.read_bytes() == b"PNGDATA"
     assert installer.calls == [("com.smile.gifmaker", False)]
     assert installer.launch_calls == ["com.smile.gifmaker", "com.smile.gifmaker"]
+
+
+def test_open_search_falls_back_to_home_search_tap_when_start_search_activity_fails(tmp_path: Path) -> None:
+    from kuaishou_navigator import KuaishouNavigator
+
+    installer = FakeInstaller()
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(returncode=1, stderr="Activity not found"),
+            FakeCompletedProcess(stdout=HOME_ACTIVITY_OUTPUT),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=b"PNGDATA"),
+        ]
+    )
+
+    navigator = KuaishouNavigator(
+        serial="deec9116",
+        installer=installer,
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    target = tmp_path / "search-home-fallback.png"
+    written = navigator.open_search(target)
+
+    assert written == target
+    assert target.read_bytes() == b"PNGDATA"
+    assert runner.calls[0]["cmd"] == [
+        "adb",
+        "-s",
+        "deec9116",
+        "shell",
+        "am",
+        "start",
+        "-W",
+        "-n",
+        "com.smile.gifmaker/com.yxcorp.plugin.search.SearchActivity",
+    ]
+    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "shell", "dumpsys", "activity", "activities"]
+    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1186", "223"]
+    assert runner.calls[3]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
 
 
 def test_capture_screen_retries_when_first_screencap_is_empty(tmp_path: Path) -> None:
@@ -427,12 +472,65 @@ def test_capture_screen_via_device_file_accepts_transient_screencap_when_file_ex
     ]
 
 
+def test_capture_screen_via_device_file_uses_zero_delay_retries(tmp_path: Path) -> None:
+    from kuaishou_navigator import KuaishouNavigator
+
+    navigator = KuaishouNavigator(
+        serial="deec9116",
+        runner=RecordingRunner([]),
+        sleeper=lambda _seconds: None,
+    )
+
+    responses = [
+        FakeCompletedProcess(returncode=-15, stderr="* daemon not running; starting now at tcp:5037"),
+        FakeCompletedProcess(stdout="-rw-rw---- 1 u0_a241 media_rw 2173569 2026-03-12 14:25 /sdcard/kuaishou_capture.png\n"),
+        FakeCompletedProcess(stdout=b"PNGDATA"),
+        FakeCompletedProcess(),
+    ]
+    recorded: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def fake_run(*args: str, **kwargs):
+        recorded.append((args, kwargs))
+        if not responses:
+            raise AssertionError(f"Missing fake response for command: {args}")
+        return responses.pop(0)
+
+    navigator._run = fake_run  # type: ignore[method-assign]
+
+    target = tmp_path / "kuaishou-fast-fallback.png"
+    written = navigator.capture_screen_via_device_file(target)
+
+    assert written == target
+    assert target.read_bytes() == b"PNGDATA"
+    assert recorded == [
+        (
+            ("shell", "screencap", "-p", "/sdcard/kuaishou_capture.png"),
+            {"retries": 5, "retry_delay_seconds": 0.0},
+        ),
+        (
+            ("shell", "ls", "-l", "/sdcard/kuaishou_capture.png"),
+            {"retries": 2, "retry_delay_seconds": 0.0},
+        ),
+        (
+            ("exec-out", "cat", "/sdcard/kuaishou_capture.png"),
+            {
+                "text": False,
+                "retries": 5,
+                "retry_delay_seconds": 0.0,
+                "accept_partial_bytes_prefix": b"\x89PNG\r\n\x1a\n",
+            },
+        ),
+        (("shell", "rm", "-f", "/sdcard/kuaishou_capture.png"), {"retries": 0}),
+    ]
+
+
 def test_open_search_raises_when_not_on_home_activity() -> None:
     from kuaishou_navigator import KuaishouNavigator, KuaishouNavigationError
 
     installer = FakeInstaller()
     runner = RecordingRunner(
         [
+            FakeCompletedProcess(returncode=1, stderr="Activity not found"),
             FakeCompletedProcess(
                 stdout=(
                     "  ResumedActivity: ActivityRecord{123 u0 "

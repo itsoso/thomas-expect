@@ -91,7 +91,7 @@ class PublicBrowseRouter:
                 destination=target,
             )
 
-        navigator = self.xiaohongshu_factory(serial=request.serial)
+        navigator = self.xiaohongshu_factory(serial=request.serial, trace_dir=request.trace_dir)
         if request.action == "open-search":
             return navigator.open_search(target)
         if request.action == "search":

@@ -27,6 +27,7 @@ DOUYIN_LIVE_TAB_TAP = (640, 364)
 DOUYIN_FIRST_LIVE_CARD_TAP = (430, 1310)
 DOUYIN_UI_DUMP_PATH = "/sdcard/douyin_nav.xml"
 DOUYIN_CAPTURE_PATH = "/sdcard/douyin_capture.png"
+DOUYIN_CAPTURE_RETRY_DELAY_SECONDS = 0.0
 DOUYIN_SEARCH_INPUT_ID = "com.ss.android.ugc.aweme:id/et_search_kw"
 DOUYIN_SEARCH_BUTTON_ID = "com.ss.android.ugc.aweme:id/4_s"
 ANDROID_PERMISSION_CONTROLLER_PACKAGE = "com.android.permissioncontroller"
@@ -366,7 +367,7 @@ class DouyinNavigator:
             "-p",
             text=False,
             retries=5,
-            retry_delay_seconds=2.0,
+            retry_delay_seconds=DOUYIN_CAPTURE_RETRY_DELAY_SECONDS,
             accept_partial_bytes_prefix=b"\x89PNG",
         )
         direct_payload = direct_result.stdout or b""
@@ -385,7 +386,7 @@ class DouyinNavigator:
             "-p",
             DOUYIN_CAPTURE_PATH,
             retries=5,
-            retry_delay_seconds=2.0,
+            retry_delay_seconds=DOUYIN_CAPTURE_RETRY_DELAY_SECONDS,
         )
         if capture_result.returncode != 0:
             raise DouyinNavigationError(self._decode_output(capture_result.stderr) or "Fallback screenshot failed")
@@ -395,7 +396,7 @@ class DouyinNavigator:
             DOUYIN_CAPTURE_PATH,
             text=False,
             retries=5,
-            retry_delay_seconds=2.0,
+            retry_delay_seconds=DOUYIN_CAPTURE_RETRY_DELAY_SECONDS,
             accept_partial_bytes_prefix=b"\x89PNG",
         )
         payload = read_result.stdout or b""
@@ -555,10 +556,6 @@ class DouyinNavigator:
     def _open_search_flow(self) -> None:
         self.launch_app_with_install_fallback()
         self.sleeper(DOUYIN_LAUNCH_SETTLE_SECONDS)
-        try:
-            self.dismiss_permission_prompt_if_present(self.dump_ui_xml())
-        except DouyinNavigationError:
-            pass
         self.tap(*DOUYIN_PRIVACY_CONSENT_TAP)
         self.sleeper(DOUYIN_PRIVACY_TAP_SETTLE_SECONDS)
         self.swipe(DOUYIN_FEED_SWIPE_START, DOUYIN_FEED_SWIPE_END, 250)
