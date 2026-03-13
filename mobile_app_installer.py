@@ -107,17 +107,20 @@ class AndroidAppInstaller:
 
     @classmethod
     def _is_transient_adb_error(cls, result: subprocess.CompletedProcess) -> bool:
-        combined_output = (cls._decode_output(result.stdout) + "\n" + cls._decode_output(result.stderr)).lower()
+        stdout = cls._decode_output(result.stdout)
+        stderr = cls._decode_output(result.stderr)
+        combined_output = (stdout + "\n" + stderr).lower()
+        has_marker = any(marker in combined_output for marker in TRANSIENT_ADB_ERRORS)
         if result.returncode == 0:
-            return False
-        return result.returncode == -15 or any(marker in combined_output for marker in TRANSIENT_ADB_ERRORS)
+            return has_marker and not stdout.strip()
+        return result.returncode == -15 or has_marker
 
     def _run(
         self,
         *args: str,
         text: bool = True,
         retries: int = 2,
-        retry_delay_seconds: float = 1.0,
+        retry_delay_seconds: float = 0.0,
     ) -> subprocess.CompletedProcess:
         last_result: subprocess.CompletedProcess | None = None
         for attempt in range(retries + 1):
@@ -141,10 +144,6 @@ class AndroidAppInstaller:
     def ensure_connected(self) -> None:
         result = self._run("get-state")
         state = (result.stdout or "").strip()
-        if result.returncode != 0 and "daemon not running" in (result.stderr or ""):
-            self.sleeper(1)
-            result = self._run("get-state")
-            state = (result.stdout or "").strip()
         if result.returncode != 0 or state != "device":
             raise AppInstallError(result.stderr or f"Unexpected adb state: {state}")
 

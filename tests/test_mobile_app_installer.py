@@ -259,12 +259,43 @@ def test_ensure_connected_tolerates_adb_daemon_bootstrap_noise() -> None:
 
     installer.ensure_connected()
 
-    assert runner.calls == [["adb", "-s", "deec9116", "get-state"]]
+
+def test_ensure_connected_retries_when_get_state_returns_empty_during_daemon_bootstrap() -> None:
+    from mobile_app_installer import AndroidAppInstaller
+
+    sleep_calls: list[float] = []
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(
+                returncode=0,
+                stdout="",
+                stderr="* daemon not running; starting now at tcp:5037\n* daemon started successfully\n",
+            ),
+            FakeCompletedProcess(returncode=0, stdout=""),
+            FakeCompletedProcess(returncode=0, stdout="device\n"),
+        ]
+    )
+
+    installer = AndroidAppInstaller(
+        serial="deec9116",
+        runner=runner,
+        sleeper=sleep_calls.append,
+    )
+
+    installer.ensure_connected()
+
+    assert runner.calls == [
+        ["adb", "-s", "deec9116", "get-state"],
+        ["adb", "-s", "deec9116", "wait-for-device"],
+        ["adb", "-s", "deec9116", "get-state"],
+    ]
+    assert sleep_calls == [0.0]
 
 
 def test_ensure_connected_retries_once_when_adb_daemon_is_bootstrapping() -> None:
     from mobile_app_installer import AndroidAppInstaller
 
+    sleep_calls: list[float] = []
     runner = RecordingRunner(
         [
             FakeCompletedProcess(
@@ -277,7 +308,7 @@ def test_ensure_connected_retries_once_when_adb_daemon_is_bootstrapping() -> Non
         ]
     )
 
-    installer = AndroidAppInstaller(serial="deec9116", runner=runner, sleeper=lambda _seconds: None)
+    installer = AndroidAppInstaller(serial="deec9116", runner=runner, sleeper=sleep_calls.append)
 
     installer.ensure_connected()
 
@@ -286,6 +317,7 @@ def test_ensure_connected_retries_once_when_adb_daemon_is_bootstrapping() -> Non
         ["adb", "-s", "deec9116", "wait-for-device"],
         ["adb", "-s", "deec9116", "get-state"],
     ]
+    assert sleep_calls == [0.0]
 
 
 def test_ensure_app_falls_back_to_resolved_launcher_when_monkey_launch_fails() -> None:
