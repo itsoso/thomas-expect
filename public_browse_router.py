@@ -7,12 +7,14 @@ from typing import Callable
 
 from douyin_navigator import DouyinNavigator
 from kuaishou_navigator import KuaishouNavigator
+from mobile_app_installer import AndroidAppInstaller
 from xiaohongshu_navigator import XiaohongshuNavigator
 
 
 DouyinFactory = Callable[..., DouyinNavigator]
 KuaishouFactory = Callable[..., KuaishouNavigator]
 XiaohongshuFactory = Callable[..., XiaohongshuNavigator]
+DevicePreparerFactory = Callable[..., AndroidAppInstaller]
 
 SUPPORTED_ACTIONS: dict[str, tuple[str, ...]] = {
     "douyin": ("open-search", "search", "open-first-result"),
@@ -42,10 +44,12 @@ class PublicBrowseRouter:
         douyin_factory: DouyinFactory = DouyinNavigator,
         kuaishou_factory: KuaishouFactory = KuaishouNavigator,
         xiaohongshu_factory: XiaohongshuFactory = XiaohongshuNavigator,
+        device_preparer_factory: DevicePreparerFactory = AndroidAppInstaller,
     ) -> None:
         self.douyin_factory = douyin_factory
         self.kuaishou_factory = kuaishou_factory
         self.xiaohongshu_factory = xiaohongshu_factory
+        self.device_preparer_factory = device_preparer_factory
 
     def _validate(self, request: PublicBrowseRequest) -> None:
         if request.platform not in SUPPORTED_ACTIONS:
@@ -62,6 +66,7 @@ class PublicBrowseRouter:
     def execute(self, request: PublicBrowseRequest) -> Path:
         self._validate(request)
         target = Path(request.output)
+        self.device_preparer_factory(serial=request.serial).prepare_device()
 
         if request.platform == "douyin":
             navigator = self.douyin_factory(serial=request.serial, trace_dir=request.trace_dir)

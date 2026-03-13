@@ -391,3 +391,26 @@ def test_parse_resolved_launcher_activity_uses_last_component_line() -> None:
     )
 
     assert resolved_activity == "com.ss.android.ugc.aweme/.LauncherActivity"
+
+
+def test_prepare_device_wakes_dismisses_keyguard_and_goes_home() -> None:
+    from mobile_app_installer import AndroidAppInstaller
+
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(stdout="device\n"),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+        ]
+    )
+
+    installer = AndroidAppInstaller(serial="deec9116", runner=runner)
+    installer.prepare_device()
+
+    assert runner.calls == [
+        ["adb", "-s", "deec9116", "get-state"],
+        ["adb", "-s", "deec9116", "shell", "input", "keyevent", "224"],
+        ["adb", "-s", "deec9116", "shell", "wm", "dismiss-keyguard"],
+        ["adb", "-s", "deec9116", "shell", "input", "keyevent", "3"],
+    ]

@@ -516,6 +516,13 @@ class KuaishouNavigator:
             KUAISHOU_SEARCH_BUTTON_ID,
         ) is not None
 
+    def _can_submit_search_from_ui(self, ui_xml: str) -> bool:
+        return (
+            not self._is_search_group_result_page(ui_xml)
+            and self._find_search_input_node(ui_xml) is not None
+            and self.maybe_find_node(ui_xml, KUAISHOU_SEARCH_BUTTON_ID) is not None
+        )
+
     def _is_search_group_result_page(self, ui_xml: str) -> bool:
         return self.maybe_find_node(ui_xml, KUAISHOU_SEARCH_GROUP_WEBVIEW_ID) is not None and self.maybe_find_node(
             ui_xml,
@@ -571,21 +578,21 @@ class KuaishouNavigator:
                 self.sleeper(2)
                 ui_xml = self.dump_ui_xml()
                 self._trace_ui_state("after_tap_home_search_without_ui_dump", ui_xml)
-                if self._is_search_page(ui_xml):
+                if self._can_submit_search_from_ui(ui_xml):
                     return ui_xml
             raise
         self._trace_ui_state("launch", ui_xml)
-        if self._is_search_page(ui_xml):
+        if self._can_submit_search_from_ui(ui_xml):
             return ui_xml
 
         if self._is_search_group_result_page(ui_xml):
             ui_xml = self._recover_from_search_group_result()
-            if self._is_search_page(ui_xml):
+            if self._can_submit_search_from_ui(ui_xml):
                 return ui_xml
 
         if self._is_search_results_page(ui_xml):
             ui_xml = self._recover_from_search_results_page(ui_xml)
-            if self._is_search_page(ui_xml):
+            if self._can_submit_search_from_ui(ui_xml):
                 return ui_xml
 
         dismiss_node = self.maybe_find_node(ui_xml, KUAISHOU_TEEN_MODE_DISMISS_ID)
@@ -595,10 +602,12 @@ class KuaishouNavigator:
             self.sleeper(1)
             ui_xml = self.dump_ui_xml()
             self._trace_ui_state("after_dismiss_teen_prompt", ui_xml)
+            if self._can_submit_search_from_ui(ui_xml):
+                return ui_xml
             if self._is_search_results_page(ui_xml):
                 ui_xml = self._recover_from_search_results_page(ui_xml)
-            if self._is_search_page(ui_xml):
-                return ui_xml
+                if self._can_submit_search_from_ui(ui_xml):
+                    return ui_xml
 
         self._trace("ensure_search_page.start_search_activity", activity=KUAISHOU_SEARCH_ACTIVITY)
         try:
@@ -606,12 +615,31 @@ class KuaishouNavigator:
             self.sleeper(2)
             ui_xml = self.dump_ui_xml()
             self._trace_ui_state("after_start_search_activity", ui_xml)
+            if self._can_submit_search_from_ui(ui_xml):
+                return ui_xml
             if self._is_search_results_page(ui_xml):
                 ui_xml = self._recover_from_search_results_page(ui_xml)
-            if self._is_search_page(ui_xml):
-                return ui_xml
+                if self._can_submit_search_from_ui(ui_xml):
+                    return ui_xml
         except KuaishouNavigationError as exc:
             self._trace("ensure_search_page.start_search_activity_failed", error=str(exc))
+            try:
+                activity = self.current_activity()
+                self._trace("ensure_search_page.activity_after_start_search_activity_failed", activity=activity)
+                if activity == KUAISHOU_HOME_ACTIVITY:
+                    self._trace("ensure_search_page.tap_home_search_after_start_search_activity_failed", center=KUAISHOU_SEARCH_TAP)
+                    self.tap(*KUAISHOU_SEARCH_TAP)
+                    self.sleeper(2)
+                    ui_xml = self.dump_ui_xml()
+                    self._trace_ui_state("after_tap_home_search_after_start_search_activity_failed", ui_xml)
+                    if self._can_submit_search_from_ui(ui_xml):
+                        return ui_xml
+                    if self._is_search_results_page(ui_xml):
+                        ui_xml = self._recover_from_search_results_page(ui_xml)
+                        if self._can_submit_search_from_ui(ui_xml):
+                            return ui_xml
+            except KuaishouNavigationError:
+                pass
 
         search_btn = self.maybe_find_node(ui_xml, KUAISHOU_HOME_SEARCH_BUTTON_ID)
         if search_btn is not None:
@@ -620,10 +648,12 @@ class KuaishouNavigator:
             self.sleeper(2)
             ui_xml = self.dump_ui_xml()
             self._trace_ui_state("after_tap_home_search", ui_xml)
+            if self._can_submit_search_from_ui(ui_xml):
+                return ui_xml
             if self._is_search_results_page(ui_xml):
                 ui_xml = self._recover_from_search_results_page(ui_xml)
-            if self._is_search_page(ui_xml):
-                return ui_xml
+                if self._can_submit_search_from_ui(ui_xml):
+                    return ui_xml
 
         if self._is_home_feed_page(ui_xml):
             self._trace("ensure_search_page.tap_home_search_hotspot", center=KUAISHOU_SEARCH_TAP)
@@ -631,10 +661,12 @@ class KuaishouNavigator:
             self.sleeper(2)
             ui_xml = self.dump_ui_xml()
             self._trace_ui_state("after_tap_home_search_hotspot", ui_xml)
+            if self._can_submit_search_from_ui(ui_xml):
+                return ui_xml
             if self._is_search_results_page(ui_xml):
                 ui_xml = self._recover_from_search_results_page(ui_xml)
-            if self._is_search_page(ui_xml):
-                return ui_xml
+                if self._can_submit_search_from_ui(ui_xml):
+                    return ui_xml
 
         raise KuaishouNavigationError("Could not reach 快手搜索页 from the current app state")
 
@@ -672,21 +704,25 @@ class KuaishouNavigator:
                 self.sleeper(0.5)
             input_strategy = self.input_keyword(keyword=keyword, pinyin=pinyin)
             if input_strategy == "adb_keyboard":
-                verified_ui = self.dump_ui_xml()
-                observed_keyword = self._current_search_text(verified_ui)
-                if observed_keyword != keyword:
-                    self._trace(
-                        "search_keyword.retry_with_pinyin",
-                        expected=keyword,
-                        observed=observed_keyword,
-                    )
-                    retry_clear_node = self.maybe_find_node(verified_ui, KUAISHOU_CLEAR_ID)
-                    if retry_clear_node is not None:
-                        self.tap(*retry_clear_node.center)
+                try:
+                    verified_ui = self.dump_ui_xml()
+                except KuaishouNavigationError as exc:
+                    self._trace("search_keyword.skip_ui_verification_after_adb_keyboard", error=str(exc))
+                else:
+                    observed_keyword = self._current_search_text(verified_ui)
+                    if observed_keyword != keyword:
+                        self._trace(
+                            "search_keyword.retry_with_pinyin",
+                            expected=keyword,
+                            observed=observed_keyword,
+                        )
+                        retry_clear_node = self.maybe_find_node(verified_ui, KUAISHOU_CLEAR_ID)
+                        if retry_clear_node is not None:
+                            self.tap(*retry_clear_node.center)
+                            self.sleeper(0.5)
+                        self.input_text(pinyin)
                         self.sleeper(0.5)
-                    self.input_text(pinyin)
-                    self.sleeper(0.5)
-                    self.keyevent(62)
+                        self.keyevent(62)
         self.sleeper(0.5)
         self.tap(*search_button.center)
         self.sleeper(2)

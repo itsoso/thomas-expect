@@ -126,6 +126,13 @@ HOME_FEED_XML = """\
 </hierarchy>
 """
 
+SYSTEM_UI_XML = """\
+<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<hierarchy rotation="0">
+  <node index="0" text="" resource-id="com.android.systemui:id/legacy_window_root" />
+</hierarchy>
+"""
+
 HOME_ACTIVITY_OUTPUT = (
     "  ResumedActivity: ActivityRecord{123 u0 "
     "com.smile.gifmaker/com.yxcorp.gifshow.HomeActivity t61}\n"
@@ -745,6 +752,86 @@ def test_search_keyword_on_search_page_prefers_adb_keyboard_for_unicode_text(tmp
     assert runner.calls[12]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
 
 
+def test_search_keyword_on_search_page_skips_ui_verification_when_adb_keyboard_input_cannot_be_dumped(
+    tmp_path: Path,
+) -> None:
+    from kuaishou_navigator import ADB_KEYBOARD_IME, KuaishouNavigator
+
+    installer = FakeInstaller()
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=ADB_KEYBOARD_LIST_OUTPUT),
+            FakeCompletedProcess(stdout="com.sohu.inputmethod.sogou.xiaomi/.SogouIME\n"),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(returncode=1, stderr="dump failed"),
+            FakeCompletedProcess(),
+        ]
+    )
+
+    navigator = KuaishouNavigator(
+        serial="deec9116",
+        installer=installer,
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    def fake_capture_screen(destination: str | Path) -> Path:
+        path = Path(destination)
+        path.write_bytes(b"PNGDATA")
+        return path
+
+    navigator.capture_screen = fake_capture_screen  # type: ignore[method-assign]
+
+    target = tmp_path / "kuaishou-search-skip-verify.png"
+    written = navigator._submit_search_on_search_page(
+        SEARCH_PAGE_XML,
+        keyword="直播带货",
+        pinyin="zhibodaihuo",
+        destination=target,
+    )
+
+    assert written == target
+    assert target.read_bytes() == b"PNGDATA"
+    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "shell", "ime", "list", "-a"]
+    assert runner.calls[2]["cmd"] == [
+        "adb",
+        "-s",
+        "deec9116",
+        "shell",
+        "settings",
+        "get",
+        "secure",
+        "default_input_method",
+    ]
+    assert runner.calls[3]["cmd"] == ["adb", "-s", "deec9116", "shell", "ime", "enable", ADB_KEYBOARD_IME]
+    assert runner.calls[4]["cmd"] == ["adb", "-s", "deec9116", "shell", "ime", "set", ADB_KEYBOARD_IME]
+    assert runner.calls[5]["cmd"][:8] == [
+        "adb",
+        "-s",
+        "deec9116",
+        "shell",
+        "am",
+        "broadcast",
+        "-a",
+        "ADB_INPUT_B64",
+    ]
+    assert runner.calls[6]["cmd"] == [
+        "adb",
+        "-s",
+        "deec9116",
+        "shell",
+        "ime",
+        "set",
+        "com.sohu.inputmethod.sogou.xiaomi/.SogouIME",
+    ]
+    assert runner.calls[7]["cmd"] == ["adb", "-s", "deec9116", "shell", "uiautomator", "dump", "/sdcard/kuaishou_nav.xml"]
+    assert runner.calls[8]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1169", "223"]
+
+
 def test_search_keyword_on_search_page_skips_retyping_when_keyword_already_matches(tmp_path: Path) -> None:
     from kuaishou_navigator import KuaishouNavigator
 
@@ -956,7 +1043,7 @@ def test_is_search_page_returns_false_for_search_results_surface() -> None:
     assert navigator._is_search_page(SEARCH_RESULTS_XML) is False
 
 
-def test_ensure_search_page_recovers_from_search_results_surface() -> None:
+def test_ensure_search_page_reuses_search_results_surface_when_submit_controls_exist() -> None:
     from kuaishou_navigator import KuaishouNavigator
 
     installer = FakeInstaller()
@@ -964,6 +1051,33 @@ def test_ensure_search_page_recovers_from_search_results_surface() -> None:
         [
             FakeCompletedProcess(stdout="UI hierchary dumped to: /sdcard/kuaishou_nav.xml\n"),
             FakeCompletedProcess(stdout=SEARCH_RESULTS_XML),
+        ]
+    )
+
+    navigator = KuaishouNavigator(
+        serial="deec9116",
+        installer=installer,
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    ui_xml = navigator.ensure_search_page_ui()
+
+    assert ui_xml.strip() == SEARCH_RESULTS_XML.strip()
+    assert installer.calls == [("com.smile.gifmaker", True)]
+    assert len(runner.calls) == 2
+
+
+def test_ensure_search_page_falls_back_to_home_hotspot_when_start_search_activity_is_not_exported() -> None:
+    from kuaishou_navigator import KuaishouNavigator
+
+    installer = FakeInstaller()
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(stdout="UI hierchary dumped to: /sdcard/kuaishou_nav.xml\n"),
+            FakeCompletedProcess(stdout=SYSTEM_UI_XML),
+            FakeCompletedProcess(returncode=255, stderr="Permission Denial: not exported"),
+            FakeCompletedProcess(stdout=HOME_ACTIVITY_OUTPUT),
             FakeCompletedProcess(),
             FakeCompletedProcess(stdout="UI hierchary dumped to: /sdcard/kuaishou_nav.xml\n"),
             FakeCompletedProcess(stdout=SEARCH_PAGE_XML),
@@ -981,7 +1095,19 @@ def test_ensure_search_page_recovers_from_search_results_surface() -> None:
 
     assert ui_xml.strip() == SEARCH_PAGE_XML.strip()
     assert installer.calls == [("com.smile.gifmaker", True)]
-    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "604", "223"]
+    assert runner.calls[2]["cmd"] == [
+        "adb",
+        "-s",
+        "deec9116",
+        "shell",
+        "am",
+        "start",
+        "-W",
+        "-n",
+        "com.smile.gifmaker/com.yxcorp.plugin.search.SearchActivity",
+    ]
+    assert runner.calls[3]["cmd"] == ["adb", "-s", "deec9116", "shell", "dumpsys", "activity", "activities"]
+    assert runner.calls[4]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1186", "223"]
 
 
 def test_dump_ui_xml_falls_back_to_cat_after_transient_dump_failure() -> None:
@@ -1206,6 +1332,7 @@ def test_search_keyword_falls_back_to_home_search_when_activity_launch_is_denied
             FakeCompletedProcess(stdout="UI hierchary dumped to: /sdcard/kuaishou_nav.xml\n"),
             FakeCompletedProcess(stdout=HOME_PAGE_XML),
             FakeCompletedProcess(returncode=255, stderr="SecurityException"),
+            FakeCompletedProcess(stdout=HOME_ACTIVITY_OUTPUT),
             FakeCompletedProcess(),
             FakeCompletedProcess(stdout="UI hierchary dumped to: /sdcard/kuaishou_nav.xml\n"),
             FakeCompletedProcess(stdout=SEARCH_PAGE_XML),
@@ -1245,7 +1372,8 @@ def test_search_keyword_falls_back_to_home_search_when_activity_launch_is_denied
         "-n",
         "com.smile.gifmaker/com.yxcorp.plugin.search.SearchActivity",
     ]
-    assert runner.calls[3]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1186", "223"]
+    assert runner.calls[3]["cmd"] == ["adb", "-s", "deec9116", "shell", "dumpsys", "activity", "activities"]
+    assert runner.calls[4]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1186", "223"]
 
 
 def test_search_keyword_taps_default_home_search_hotspot_when_feed_has_no_search_id(tmp_path: Path) -> None:
@@ -1257,6 +1385,7 @@ def test_search_keyword_taps_default_home_search_hotspot_when_feed_has_no_search
             FakeCompletedProcess(stdout="UI hierchary dumped to: /sdcard/kuaishou_nav.xml\n"),
             FakeCompletedProcess(stdout=HOME_FEED_XML),
             FakeCompletedProcess(returncode=255, stderr="SecurityException"),
+            FakeCompletedProcess(stdout=HOME_ACTIVITY_OUTPUT),
             FakeCompletedProcess(),
             FakeCompletedProcess(stdout="UI hierchary dumped to: /sdcard/kuaishou_nav.xml\n"),
             FakeCompletedProcess(stdout=SEARCH_PAGE_XML),
@@ -1295,7 +1424,8 @@ def test_search_keyword_taps_default_home_search_hotspot_when_feed_has_no_search
         "-n",
         "com.smile.gifmaker/com.yxcorp.plugin.search.SearchActivity",
     ]
-    assert runner.calls[3]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1186", "223"]
+    assert runner.calls[3]["cmd"] == ["adb", "-s", "deec9116", "shell", "dumpsys", "activity", "activities"]
+    assert runner.calls[4]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1186", "223"]
 
 
 def test_search_keyword_force_stops_when_launch_starts_in_search_group_result(tmp_path: Path) -> None:
@@ -1310,6 +1440,7 @@ def test_search_keyword_force_stops_when_launch_starts_in_search_group_result(tm
             FakeCompletedProcess(stdout="UI hierchary dumped to: /sdcard/kuaishou_nav.xml\n"),
             FakeCompletedProcess(stdout=HOME_PAGE_XML),
             FakeCompletedProcess(returncode=255, stderr="SecurityException"),
+            FakeCompletedProcess(stdout=HOME_ACTIVITY_OUTPUT),
             FakeCompletedProcess(),
             FakeCompletedProcess(stdout="UI hierchary dumped to: /sdcard/kuaishou_nav.xml\n"),
             FakeCompletedProcess(stdout=SEARCH_PAGE_XML),
@@ -1351,7 +1482,54 @@ def test_search_keyword_force_stops_when_launch_starts_in_search_group_result(tm
         "-n",
         "com.smile.gifmaker/com.yxcorp.plugin.search.SearchActivity",
     ]
-    assert runner.calls[6]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1186", "223"]
+    assert runner.calls[6]["cmd"] == ["adb", "-s", "deec9116", "shell", "dumpsys", "activity", "activities"]
+    assert runner.calls[7]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1186", "223"]
+
+
+def test_search_keyword_submits_directly_from_search_results_surface_after_home_hotspot(tmp_path: Path) -> None:
+    from kuaishou_navigator import KuaishouNavigator
+
+    installer = FakeInstaller()
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(stdout="UI hierchary dumped to: /sdcard/kuaishou_nav.xml\n"),
+            FakeCompletedProcess(stdout=HOME_FEED_XML),
+            FakeCompletedProcess(returncode=255, stderr="SecurityException"),
+            FakeCompletedProcess(stdout=HOME_ACTIVITY_OUTPUT),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout="UI hierchary dumped to: /sdcard/kuaishou_nav.xml\n"),
+            FakeCompletedProcess(stdout=SEARCH_PAGE_XML),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=NO_ADB_KEYBOARD_LIST_OUTPUT),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=b"PNGDATA"),
+        ]
+    )
+
+    navigator = KuaishouNavigator(
+        serial="deec9116",
+        installer=installer,
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    written = navigator.search_keyword(
+        keyword="直播带货",
+        pinyin="zhibodaihuo",
+        destination=tmp_path / "result.png",
+    )
+
+    assert written == tmp_path / "result.png"
+    assert installer.calls == [("com.smile.gifmaker", True)]
+    assert runner.calls[4]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1186", "223"]
+    assert runner.calls[7]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1010", "223"]
+    assert runner.calls[8]["cmd"] == ["adb", "-s", "deec9116", "shell", "ime", "list", "-a"]
+    assert runner.calls[9]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "text", "zhibodaihuo"]
+    assert runner.calls[10]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "keyevent", "62"]
+    assert runner.calls[11]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1169", "223"]
+    assert all(call["cmd"] != ["adb", "-s", "deec9116", "shell", "input", "tap", "604", "223"] for call in runner.calls)
 
 
 def test_search_keyword_uses_home_activity_fallback_when_initial_dump_is_empty(tmp_path: Path) -> None:

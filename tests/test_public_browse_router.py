@@ -5,6 +5,18 @@ from pathlib import Path
 import pytest
 
 
+class FakeDevicePreparer:
+    instances: list["FakeDevicePreparer"] = []
+
+    def __init__(self, serial: str | None = None, **_kwargs) -> None:
+        self.serial = serial
+        self.prepare_calls = 0
+        type(self).instances.append(self)
+
+    def prepare_device(self) -> None:
+        self.prepare_calls += 1
+
+
 class FakeDouyinNavigator:
     instances: list["FakeDouyinNavigator"] = []
 
@@ -93,6 +105,7 @@ def reset_fake_navigators() -> None:
     FakeDouyinNavigator.instances.clear()
     FakeKuaishouNavigator.instances.clear()
     FakeXiaohongshuNavigator.instances.clear()
+    FakeDevicePreparer.instances.clear()
 
 
 def test_router_routes_douyin_open_first_result_to_live_room(tmp_path: Path) -> None:
@@ -103,6 +116,7 @@ def test_router_routes_douyin_open_first_result_to_live_room(tmp_path: Path) -> 
         douyin_factory=FakeDouyinNavigator,
         kuaishou_factory=FakeKuaishouNavigator,
         xiaohongshu_factory=FakeXiaohongshuNavigator,
+        device_preparer_factory=FakeDevicePreparer,
     )
 
     target = tmp_path / "douyin-live.png"
@@ -122,6 +136,9 @@ def test_router_routes_douyin_open_first_result_to_live_room(tmp_path: Path) -> 
     assert written == target
     assert target.read_bytes() == b"DOUYIN-LIVE"
     assert len(FakeDouyinNavigator.instances) == 1
+    assert len(FakeDevicePreparer.instances) == 1
+    assert FakeDevicePreparer.instances[0].serial == "device-1"
+    assert FakeDevicePreparer.instances[0].prepare_calls == 1
     assert FakeDouyinNavigator.instances[0].serial == "device-1"
     assert FakeDouyinNavigator.instances[0].trace_dir == str(trace_dir)
     assert FakeDouyinNavigator.instances[0].calls == [
@@ -137,6 +154,7 @@ def test_router_routes_kuaishou_search_and_passes_trace_dir(tmp_path: Path) -> N
         douyin_factory=FakeDouyinNavigator,
         kuaishou_factory=FakeKuaishouNavigator,
         xiaohongshu_factory=FakeXiaohongshuNavigator,
+        device_preparer_factory=FakeDevicePreparer,
     )
 
     target = tmp_path / "kuaishou-search.png"
@@ -156,6 +174,9 @@ def test_router_routes_kuaishou_search_and_passes_trace_dir(tmp_path: Path) -> N
     assert written == target
     assert target.read_bytes() == b"KUAISHOU-RESULT"
     assert len(FakeKuaishouNavigator.instances) == 1
+    assert len(FakeDevicePreparer.instances) == 1
+    assert FakeDevicePreparer.instances[0].serial == "device-2"
+    assert FakeDevicePreparer.instances[0].prepare_calls == 1
     assert FakeKuaishouNavigator.instances[0].serial == "device-2"
     assert FakeKuaishouNavigator.instances[0].trace_dir == str(trace_dir)
     assert FakeKuaishouNavigator.instances[0].calls == [
@@ -171,6 +192,7 @@ def test_router_routes_kuaishou_open_first_result_to_live_room(tmp_path: Path) -
         douyin_factory=FakeDouyinNavigator,
         kuaishou_factory=FakeKuaishouNavigator,
         xiaohongshu_factory=FakeXiaohongshuNavigator,
+        device_preparer_factory=FakeDevicePreparer,
     )
 
     target = tmp_path / "kuaishou-live.png"
@@ -190,6 +212,9 @@ def test_router_routes_kuaishou_open_first_result_to_live_room(tmp_path: Path) -
     assert written == target
     assert target.read_bytes() == b"KUAISHOU-LIVE"
     assert len(FakeKuaishouNavigator.instances) == 1
+    assert len(FakeDevicePreparer.instances) == 1
+    assert FakeDevicePreparer.instances[0].serial == "device-4"
+    assert FakeDevicePreparer.instances[0].prepare_calls == 1
     assert FakeKuaishouNavigator.instances[0].serial == "device-4"
     assert FakeKuaishouNavigator.instances[0].trace_dir == str(trace_dir)
     assert FakeKuaishouNavigator.instances[0].calls == [
@@ -205,6 +230,7 @@ def test_router_routes_xiaohongshu_open_first_result(tmp_path: Path) -> None:
         douyin_factory=FakeDouyinNavigator,
         kuaishou_factory=FakeKuaishouNavigator,
         xiaohongshu_factory=FakeXiaohongshuNavigator,
+        device_preparer_factory=FakeDevicePreparer,
     )
 
     target = tmp_path / "xhs-note.png"
@@ -223,6 +249,9 @@ def test_router_routes_xiaohongshu_open_first_result(tmp_path: Path) -> None:
     assert written == target
     assert target.read_bytes() == b"XHS-NOTE"
     assert len(FakeXiaohongshuNavigator.instances) == 1
+    assert len(FakeDevicePreparer.instances) == 1
+    assert FakeDevicePreparer.instances[0].serial == "device-3"
+    assert FakeDevicePreparer.instances[0].prepare_calls == 1
     assert FakeXiaohongshuNavigator.instances[0].serial == "device-3"
     assert FakeXiaohongshuNavigator.instances[0].trace_dir == str(trace_dir)
     assert FakeXiaohongshuNavigator.instances[0].calls == [
@@ -237,6 +266,7 @@ def test_router_requires_query_for_search_actions(tmp_path: Path) -> None:
         douyin_factory=FakeDouyinNavigator,
         kuaishou_factory=FakeKuaishouNavigator,
         xiaohongshu_factory=FakeXiaohongshuNavigator,
+        device_preparer_factory=FakeDevicePreparer,
     )
 
     with pytest.raises(PublicBrowseRouterError, match="requires query"):
@@ -256,6 +286,7 @@ def test_router_requires_pinyin_for_douyin_and_kuaishou_search(tmp_path: Path) -
         douyin_factory=FakeDouyinNavigator,
         kuaishou_factory=FakeKuaishouNavigator,
         xiaohongshu_factory=FakeXiaohongshuNavigator,
+        device_preparer_factory=FakeDevicePreparer,
     )
 
     with pytest.raises(PublicBrowseRouterError, match="requires pinyin"):
@@ -277,6 +308,7 @@ def test_main_executes_router_request_and_prints_output(tmp_path: Path, capsys: 
         douyin_factory=FakeDouyinNavigator,
         kuaishou_factory=FakeKuaishouNavigator,
         xiaohongshu_factory=FakeXiaohongshuNavigator,
+        device_preparer_factory=FakeDevicePreparer,
     )
 
     target = tmp_path / "cli-xhs.png"
@@ -298,4 +330,7 @@ def test_main_executes_router_request_and_prints_output(tmp_path: Path, capsys: 
 
     assert exit_code == 0
     assert target.read_bytes() == b"XHS-RESULT"
+    assert len(FakeDevicePreparer.instances) == 1
+    assert FakeDevicePreparer.instances[0].serial == "device-9"
+    assert FakeDevicePreparer.instances[0].prepare_calls == 1
     assert "Public browse screenshot saved to" in capsys.readouterr().out

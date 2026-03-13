@@ -227,15 +227,48 @@ This prompt set does **not** include:
 ## 10. Current Implementation Mapping
 
 - Router entry: `/Users/liqiuhua/work/personal/claw-creator/thomas-expect/public_browse_router.py`
+- Backend bridge service: `/Users/liqiuhua/work/personal/claw-creator/backend/app/services/mobile_device/public_browse_service.py`
+- Backend admin API: `/Users/liqiuhua/work/personal/claw-creator/backend/app/api/openclaw.py`
+- OpenClaw slash-command handler: `/Users/liqiuhua/work/personal/claw-creator/backend/app/services/openclaw_service.py`
 - 抖音 navigator: `/Users/liqiuhua/work/personal/claw-creator/thomas-expect/douyin_navigator.py`
 - 快手 navigator: `/Users/liqiuhua/work/personal/claw-creator/thomas-expect/kuaishou_navigator.py`
 - 小红书 navigator: `/Users/liqiuhua/work/personal/claw-creator/thomas-expect/xiaohongshu_navigator.py`
 - Android installer / launcher: `/Users/liqiuhua/work/personal/claw-creator/thomas-expect/mobile_app_installer.py`
 
-## 11. Evidence Note
+## 11. Operator Command
+
+The current operator-facing command that can be sent in the OpenClaw tab is:
+
+```text
+/public-browse <platform> <action> "<query>" <pinyin>
+```
+
+Examples:
+
+```text
+/public-browse douyin open-first-result "美女直播" meinvzhibo
+/public-browse kuaishou open-first-result "直播带货" zhibodaihuo
+/public-browse xiaohongshu open-first-result "汉服穿搭"
+```
+
+Rules:
+
+- `platform`: `douyin | kuaishou | xiaohongshu`
+- `action`: `open-search | search | open-first-result`
+- `query`: required for `search` and `open-first-result`
+- `pinyin`: required for `douyin` and `kuaishou` when action is not `open-search`
+
+Successful execution returns a text summary with:
+
+- platform
+- action
+- screenshot path
+- trace path
+- router stdout/stderr when available
+
+## 12. Evidence Note
 
 Current validated proof artifacts from this repo workstream include:
 
 - Kuaishou clean live-room screenshot: `/tmp/kuaishou-final-clean.jpg`
 - Existing router plan doc: `/Users/liqiuhua/work/personal/claw-creator/thomas-expect/docs/plans/2026-03-12-unified-public-browse-router.md`
-

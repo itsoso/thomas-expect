@@ -147,6 +147,12 @@ class AndroidAppInstaller:
         if result.returncode != 0 or state != "device":
             raise AppInstallError(result.stderr or f"Unexpected adb state: {state}")
 
+    def prepare_device(self) -> None:
+        self.ensure_connected()
+        self._run("shell", "input", "keyevent", "224", retries=0)
+        self._run("shell", "wm", "dismiss-keyguard", retries=0)
+        self._run("shell", "input", "keyevent", "3", retries=0)
+
     def is_installed(self, package_name: str) -> bool:
         result = self._run("shell", "pm", "path", package_name)
         return result.returncode == 0 and "package:" in (result.stdout or "")
