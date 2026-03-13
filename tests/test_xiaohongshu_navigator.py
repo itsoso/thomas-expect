@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from test_douyin_navigator import ADB_KEYBOARD_LIST_OUTPUT, FakeCompletedProcess, FakeInstaller, RecordingRunner
@@ -51,6 +52,50 @@ def test_open_search_launches_xiaohongshu_and_captures_search_page(tmp_path: Pat
     assert runner.calls[4]["text"] is False
 
 
+def test_open_search_writes_trace_file_when_trace_dir_is_provided(tmp_path: Path) -> None:
+    from xiaohongshu_navigator import XiaohongshuNavigator
+
+    installer = FakeInstaller()
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=b"\x89PNGDATA"),
+        ]
+    )
+    trace_dir = tmp_path / "trace"
+
+    navigator = XiaohongshuNavigator(
+        serial="deec9116",
+        installer=installer,
+        runner=runner,
+        sleeper=lambda _seconds: None,
+        trace_dir=trace_dir,
+    )
+
+    target = tmp_path / "xhs-search-trace.png"
+    navigator.open_search(target)
+
+    trace_file = trace_dir / "trace.jsonl"
+    assert trace_file.exists()
+    trace_rows = [json.loads(line) for line in trace_file.read_text(encoding="utf-8").splitlines()]
+    assert any(row["event"] == "open_search_start" for row in trace_rows)
+    assert any(row["event"] == "open_search_force_stop_start" for row in trace_rows)
+    assert any(row["event"] == "open_search_force_stop_complete" for row in trace_rows)
+    assert any(row["event"] == "open_search_launch_start" for row in trace_rows)
+    assert any(row["event"] == "open_search_launch_complete" for row in trace_rows)
+    assert any(row["event"] == "open_search_privacy_tap_start" for row in trace_rows)
+    assert any(row["event"] == "open_search_privacy_tap_complete" for row in trace_rows)
+    assert any(row["event"] == "open_search_search_icon_tap_start" for row in trace_rows)
+    assert any(row["event"] == "open_search_search_icon_tap_complete" for row in trace_rows)
+    assert any(row["event"] == "open_search_capture_start" for row in trace_rows)
+    assert any(row["event"] == "open_search_capture_complete" for row in trace_rows)
+    assert any(row["event"] == "adb_command_start" for row in trace_rows)
+    assert any(row["event"] == "open_search_complete" for row in trace_rows)
+
+
 def test_open_discovery_launches_xiaohongshu_accepts_privacy_and_captures_screen(tmp_path: Path) -> None:
     from xiaohongshu_navigator import XiaohongshuNavigator
 
@@ -91,6 +136,106 @@ def test_open_discovery_launches_xiaohongshu_accepts_privacy_and_captures_screen
     assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "640", "1885"]
     assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
     assert runner.calls[2]["text"] is False
+
+
+def test_capture_screen_waits_for_device_after_transient_adb_restart(tmp_path: Path) -> None:
+    from xiaohongshu_navigator import XiaohongshuNavigator
+
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(returncode=1, stderr="* daemon not running; starting now at tcp:5037\n"),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=b"\x89PNGDATA"),
+        ]
+    )
+
+    navigator = XiaohongshuNavigator(
+        serial="deec9116",
+        installer=FakeInstaller(),
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    target = tmp_path / "xhs-retry.png"
+    written = navigator.capture_screen(target)
+
+    assert written == target
+    assert target.read_bytes() == b"\x89PNGDATA"
+    assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
+    assert runner.calls[0]["text"] is False
+    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "wait-for-device"]
+    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
+    assert runner.calls[2]["text"] is False
+
+
+def test_tap_accepts_zero_returncode_even_when_daemon_restart_noise_is_present() -> None:
+    from xiaohongshu_navigator import XiaohongshuNavigator
+
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(
+                returncode=0,
+                stderr="* daemon not running; starting now at tcp:5037\n* daemon started successfully\n",
+            ),
+        ]
+    )
+
+    navigator = XiaohongshuNavigator(
+        serial="deec9116",
+        installer=FakeInstaller(),
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    navigator.tap(640, 1885)
+
+    assert runner.calls == [
+        {
+            "cmd": ["adb", "-s", "deec9116", "shell", "input", "tap", "640", "1885"],
+            "capture_output": True,
+            "text": True,
+            "check": False,
+            "timeout": None,
+        }
+    ]
+
+
+def test_capture_screen_falls_back_to_device_file_when_direct_capture_keeps_failing(tmp_path: Path) -> None:
+    from xiaohongshu_navigator import XiaohongshuNavigator
+
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(returncode=1, stderr="* daemon not running; starting now at tcp:5037\n"),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(returncode=1, stderr="* daemon not running; starting now at tcp:5037\n"),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(returncode=1, stderr="* daemon not running; starting now at tcp:5037\n"),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(returncode=1, stderr="* daemon not running; starting now at tcp:5037\n"),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(returncode=1, stderr="* daemon not running; starting now at tcp:5037\n"),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(returncode=1, stderr="* daemon not running; starting now at tcp:5037\n"),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=b"\x89PNGDATA"),
+        ]
+    )
+
+    navigator = XiaohongshuNavigator(
+        serial="deec9116",
+        installer=FakeInstaller(),
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    target = tmp_path / "xhs-fallback.png"
+    written = navigator.capture_screen(target)
+
+    assert written == target
+    assert target.read_bytes() == b"\x89PNGDATA"
+    assert runner.calls[11]["cmd"] == ["adb", "-s", "deec9116", "shell", "screencap", "-p", "/sdcard/xhs_nav.png"]
+    assert runner.calls[12]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "cat", "/sdcard/xhs_nav.png"]
+    assert runner.calls[12]["text"] is False
 
 
 def test_enter_first_feed_note_taps_first_note_card_and_captures_screen(tmp_path: Path) -> None:
@@ -175,7 +320,7 @@ def test_search_keyword_on_search_page_clears_field_inputs_keyword_and_taps_firs
 
 
 def test_search_keyword_on_search_page_prefers_adb_keyboard_when_available(tmp_path: Path) -> None:
-    from xiaohongshu_navigator import ADB_KEYBOARD_IME, XiaohongshuNavigator
+    from xiaohongshu_navigator import ADB_KEYBOARD_B64_ACTION, ADB_KEYBOARD_IME, XiaohongshuNavigator
 
     runner = RecordingRunner(
         [
@@ -212,7 +357,19 @@ def test_search_keyword_on_search_page_prefers_adb_keyboard_when_available(tmp_p
     assert runner.calls[4]["cmd"] == ["adb", "-s", "deec9116", "shell", "settings", "get", "secure", "default_input_method"]
     assert runner.calls[5]["cmd"] == ["adb", "-s", "deec9116", "shell", "ime", "enable", ADB_KEYBOARD_IME]
     assert runner.calls[6]["cmd"] == ["adb", "-s", "deec9116", "shell", "ime", "set", ADB_KEYBOARD_IME]
-    assert runner.calls[7]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "text", "hanfu"]
+    assert runner.calls[7]["cmd"] == [
+        "adb",
+        "-s",
+        "deec9116",
+        "shell",
+        "am",
+        "broadcast",
+        "-a",
+        ADB_KEYBOARD_B64_ACTION,
+        "--es",
+        "msg",
+        "aGFuZnU=",
+    ]
     assert runner.calls[8]["cmd"] == [
         "adb",
         "-s",

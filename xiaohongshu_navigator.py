@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import json
 from pathlib import Path
 import subprocess
 import time
@@ -18,7 +20,9 @@ XHS_SEARCH_FIELD_TAP = (260, 170)
 XHS_FIRST_SUGGESTION_TAP = (180, 360)
 XHS_FIRST_FEED_NOTE_TAP = (970, 640)
 XHS_FIRST_SEARCH_NOTE_TAP = (250, 760)
+XHS_CAPTURE_PATH = "/sdcard/xhs_nav.png"
 ADB_KEYBOARD_IME = "com.android.adbkeyboard/.AdbIME"
+ADB_KEYBOARD_B64_ACTION = "ADB_INPUT_B64"
 DELETE_TEXT_BATCH_SIZE = 12
 TRANSIENT_ADB_ERRORS = (
     "daemon not running",
@@ -39,17 +43,32 @@ class XiaohongshuNavigator:
         adb_path: str = "adb",
         runner: Runner | None = None,
         sleeper: Sleeper | None = None,
+        trace_dir: str | Path | None = None,
     ) -> None:
         self.serial = serial
         self.adb_path = adb_path
         self.runner = runner or subprocess.run
         self.sleeper = sleeper or time.sleep
+        self.trace_dir = Path(trace_dir) if trace_dir else None
+        if self.trace_dir is not None:
+            self.trace_dir.mkdir(parents=True, exist_ok=True)
+            self.trace_file = self.trace_dir / "trace.jsonl"
+        else:
+            self.trace_file = None
         self.installer = installer or AndroidAppInstaller(
             serial=serial,
             adb_path=adb_path,
             runner=self.runner,
             sleeper=self.sleeper,
         )
+
+    def _trace(self, event: str, **payload: object) -> None:
+        if self.trace_file is None:
+            return
+        sanitized: dict[str, object] = {"event": event, "timestamp": round(time.time(), 3)}
+        sanitized.update(payload)
+        with self.trace_file.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(sanitized, ensure_ascii=False) + "\n")
 
     def _build_command(self, *args: str) -> list[str]:
         command = [self.adb_path]
@@ -80,12 +99,30 @@ class XiaohongshuNavigator:
     ) -> subprocess.CompletedProcess:
         last_result: subprocess.CompletedProcess | None = None
         for attempt in range(retries + 1):
+            command = self._build_command(*args)
+            self._trace(
+                "adb_command_start",
+                command=command,
+                attempt=attempt + 1,
+                max_attempts=retries + 1,
+                text=text,
+            )
             last_result = self.runner(
-                self._build_command(*args),
+                command,
                 capture_output=True,
                 text=text,
                 check=False,
             )
+            self._trace(
+                "adb_command_result",
+                command=command,
+                attempt=attempt + 1,
+                returncode=last_result.returncode,
+                stdout=self._decode_output(last_result.stdout)[:300],
+                stderr=self._decode_output(last_result.stderr)[:300],
+            )
+            if last_result.returncode == 0:
+                return last_result
             if not self._is_transient_adb_error(last_result) or attempt == retries:
                 return last_result
             wait_result = self.runner(
@@ -93,6 +130,13 @@ class XiaohongshuNavigator:
                 capture_output=True,
                 text=True,
                 check=False,
+            )
+            self._trace(
+                "adb_wait_for_device",
+                command=self._build_command("wait-for-device"),
+                attempt=attempt + 1,
+                returncode=wait_result.returncode,
+                stderr=self._decode_output(wait_result.stderr)[:300],
             )
             if wait_result.returncode != 0 and attempt == retries:
                 return wait_result
@@ -148,7 +192,21 @@ class XiaohongshuNavigator:
         restore_ime = current_ime if current_ime and current_ime != ADB_KEYBOARD_IME else None
         try:
             self.set_input_method(ADB_KEYBOARD_IME, enable=True)
-            self.input_text(value)
+            payload = base64.b64encode(value.encode("utf-8")).decode("ascii")
+            result = self._run(
+                "shell",
+                "am",
+                "broadcast",
+                "-a",
+                ADB_KEYBOARD_B64_ACTION,
+                "--es",
+                "msg",
+                payload,
+            )
+            if result.returncode != 0:
+                raise XiaohongshuNavigationError(
+                    self._decode_output(result.stderr) or "Failed to broadcast unicode text via ADBKeyBoard"
+                )
         finally:
             if restore_ime:
                 self.set_input_method(restore_ime)
@@ -227,26 +285,82 @@ class XiaohongshuNavigator:
                 last_error = self._decode_output(wait_result.stderr) or last_error
                 break
             self.sleeper(2.0)
-        raise XiaohongshuNavigationError(last_error or "Xiaohongshu screenshot failed")
+        return self.capture_screen_via_device_file(destination, last_error=last_error)
+
+    def capture_screen_via_device_file(self, destination: str | Path, last_error: str | None = None) -> Path:
+        target = Path(destination)
+        capture_result = self._run(
+            "shell",
+            "screencap",
+            "-p",
+            XHS_CAPTURE_PATH,
+            text=True,
+            retries=5,
+            retry_delay_seconds=2.0,
+        )
+        if capture_result.returncode != 0:
+            raise XiaohongshuNavigationError(
+                self._decode_output(capture_result.stderr) or last_error or "Fallback screenshot failed"
+            )
+
+        read_result = self._run(
+            "exec-out",
+            "cat",
+            XHS_CAPTURE_PATH,
+            text=False,
+            retries=5,
+            retry_delay_seconds=2.0,
+        )
+        payload = read_result.stdout or b""
+        if isinstance(payload, str):
+            payload = payload.encode()
+        if read_result.returncode != 0 or not payload.startswith(b"\x89PNG"):
+            raise XiaohongshuNavigationError(
+                self._decode_output(read_result.stderr) or last_error or "Fallback screenshot read failed"
+            )
+        target.write_bytes(payload)
+        return target
 
     def open_discovery(self, destination: str | Path) -> Path:
+        self._trace("open_discovery_start", destination=str(destination))
         self.installer.ensure_app(KNOWN_APPS["xiaohongshu"], launch_after_install=False)
+        self._trace("open_discovery_launch_start")
         self.launch_app()
         self.sleeper(2)
+        self._trace("open_discovery_launch_complete")
+        self._trace("open_discovery_privacy_tap_start")
         self.tap(*XHS_PRIVACY_CONSENT_TAP)
         self.sleeper(2)
-        return self.capture_screen(destination)
+        self._trace("open_discovery_privacy_tap_complete")
+        self._trace("open_discovery_capture_start", destination=str(destination))
+        output = self.capture_screen(destination)
+        self._trace("open_discovery_capture_complete", destination=str(output))
+        self._trace("open_discovery_complete", destination=str(output))
+        return output
 
     def open_search(self, destination: str | Path) -> Path:
+        self._trace("open_search_start", destination=str(destination))
         self.installer.ensure_app(KNOWN_APPS["xiaohongshu"], launch_after_install=False)
+        self._trace("open_search_force_stop_start")
         self.force_stop_app()
+        self._trace("open_search_force_stop_complete")
+        self._trace("open_search_launch_start")
         self.launch_app()
         self.sleeper(2)
+        self._trace("open_search_launch_complete")
+        self._trace("open_search_privacy_tap_start")
         self.tap(*XHS_PRIVACY_CONSENT_TAP)
         self.sleeper(1)
+        self._trace("open_search_privacy_tap_complete")
+        self._trace("open_search_search_icon_tap_start")
         self.tap(*XHS_SEARCH_ICON_TAP)
         self.sleeper(2)
-        return self.capture_screen(destination)
+        self._trace("open_search_search_icon_tap_complete")
+        self._trace("open_search_capture_start", destination=str(destination))
+        output = self.capture_screen(destination)
+        self._trace("open_search_capture_complete", destination=str(output))
+        self._trace("open_search_complete", destination=str(output))
+        return output
 
     def enter_first_feed_note(self, destination: str | Path) -> Path:
         self.tap(*XHS_FIRST_FEED_NOTE_TAP)
@@ -286,6 +400,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Open Xiaohongshu discovery feed and capture screenshots.")
     parser.add_argument("--serial", help="ADB serial to target a specific device.")
     parser.add_argument("--output", default="/tmp/xhs-discovery.png", help="Destination screenshot path.")
+    parser.add_argument("--trace-dir", help="Optional trace directory for Xiaohongshu navigation.")
     parser.add_argument(
         "--enter-first-note",
         action="store_true",
@@ -303,7 +418,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    navigator = XiaohongshuNavigator(serial=args.serial)
+    navigator = XiaohongshuNavigator(serial=args.serial, trace_dir=args.trace_dir)
     if args.open_first_search_note:
         if not args.query:
             raise XiaohongshuNavigationError("--open-first-search-note requires --query")
