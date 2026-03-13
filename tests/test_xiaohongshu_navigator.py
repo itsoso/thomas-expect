@@ -80,7 +80,15 @@ def test_open_search_falls_back_to_install_check_when_launch_fails(tmp_path: Pat
     assert written == target
     assert target.read_bytes() == b"\x89PNGDATA"
     assert installer.calls == [("com.xingin.xhs", False)]
-    assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "shell", "am", "force-stop", "com.xingin.xhs"]
+    assert runner.calls[0]["cmd"] == [
+        "adb",
+        "-s",
+        "deec9116",
+        "shell",
+        "am",
+        "force-stop",
+        "com.xingin.xhs",
+    ]
     assert runner.calls[1]["cmd"] == [
         "adb",
         "-s",
@@ -105,6 +113,8 @@ def test_open_search_falls_back_to_install_check_when_launch_fails(tmp_path: Pat
         "android.intent.category.LAUNCHER",
         "1",
     ]
+    assert runner.calls[3]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "640", "1885"]
+    assert runner.calls[4]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1180", "210"]
 
 
 def test_open_search_writes_trace_file_when_trace_dir_is_provided(tmp_path: Path) -> None:
@@ -193,7 +203,7 @@ def test_open_discovery_launches_xiaohongshu_accepts_privacy_and_captures_screen
     assert runner.calls[2]["text"] is False
 
 
-def test_capture_screen_waits_for_device_after_transient_adb_restart(tmp_path: Path) -> None:
+def test_capture_screen_falls_back_immediately_after_direct_capture_restart_noise(tmp_path: Path) -> None:
     from xiaohongshu_navigator import XiaohongshuNavigator
 
     runner = RecordingRunner(
@@ -218,8 +228,8 @@ def test_capture_screen_waits_for_device_after_transient_adb_restart(tmp_path: P
     assert target.read_bytes() == b"\x89PNGDATA"
     assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
     assert runner.calls[0]["text"] is False
-    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "wait-for-device"]
-    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
+    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "shell", "screencap", "-p", "/sdcard/xhs_nav.png"]
+    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "cat", "/sdcard/xhs_nav.png"]
     assert runner.calls[2]["text"] is False
 
 
@@ -262,16 +272,6 @@ def test_capture_screen_falls_back_to_device_file_when_direct_capture_keeps_fail
         [
             FakeCompletedProcess(returncode=1, stderr="* daemon not running; starting now at tcp:5037\n"),
             FakeCompletedProcess(),
-            FakeCompletedProcess(returncode=1, stderr="* daemon not running; starting now at tcp:5037\n"),
-            FakeCompletedProcess(),
-            FakeCompletedProcess(returncode=1, stderr="* daemon not running; starting now at tcp:5037\n"),
-            FakeCompletedProcess(),
-            FakeCompletedProcess(returncode=1, stderr="* daemon not running; starting now at tcp:5037\n"),
-            FakeCompletedProcess(),
-            FakeCompletedProcess(returncode=1, stderr="* daemon not running; starting now at tcp:5037\n"),
-            FakeCompletedProcess(),
-            FakeCompletedProcess(returncode=1, stderr="* daemon not running; starting now at tcp:5037\n"),
-            FakeCompletedProcess(),
             FakeCompletedProcess(stdout=b"\x89PNGDATA"),
         ]
     )
@@ -288,9 +288,9 @@ def test_capture_screen_falls_back_to_device_file_when_direct_capture_keeps_fail
 
     assert written == target
     assert target.read_bytes() == b"\x89PNGDATA"
-    assert runner.calls[11]["cmd"] == ["adb", "-s", "deec9116", "shell", "screencap", "-p", "/sdcard/xhs_nav.png"]
-    assert runner.calls[12]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "cat", "/sdcard/xhs_nav.png"]
-    assert runner.calls[12]["text"] is False
+    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "shell", "screencap", "-p", "/sdcard/xhs_nav.png"]
+    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "cat", "/sdcard/xhs_nav.png"]
+    assert runner.calls[2]["text"] is False
 
 
 def test_enter_first_feed_note_taps_first_note_card_and_captures_screen(tmp_path: Path) -> None:

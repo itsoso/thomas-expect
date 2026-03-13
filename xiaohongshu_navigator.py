@@ -268,32 +268,24 @@ class XiaohongshuNavigator:
     def capture_screen(self, destination: str | Path) -> Path:
         target = Path(destination)
         last_error = "Xiaohongshu screenshot payload is not a PNG"
-        for attempt in range(6):
-            capture_result = self.runner(
-                self._build_command("exec-out", "screencap", "-p"),
-                capture_output=True,
-                text=False,
-                check=False,
-            )
-            payload = capture_result.stdout or b""
-            if isinstance(payload, str):
-                payload = payload.encode()
-            if payload.startswith(b"\x89PNG"):
-                target.write_bytes(payload)
-                return target
-            last_error = self._decode_output(capture_result.stderr) or last_error
-            if not self._is_transient_adb_error(capture_result) or attempt == 5:
-                break
-            wait_result = self.runner(
-                self._build_command("wait-for-device"),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if wait_result.returncode != 0:
-                last_error = self._decode_output(wait_result.stderr) or last_error
-                break
-            self.sleeper(2.0)
+        capture_result = self.runner(
+            self._build_command("exec-out", "screencap", "-p"),
+            capture_output=True,
+            text=False,
+            check=False,
+        )
+        payload = capture_result.stdout or b""
+        if isinstance(payload, str):
+            payload = payload.encode()
+        if payload.startswith(b"\x89PNG"):
+            target.write_bytes(payload)
+            return target
+        last_error = self._decode_output(capture_result.stderr) or last_error
+        self._trace(
+            "capture_screen_direct_fallback",
+            returncode=capture_result.returncode,
+            stderr=last_error[:300],
+        )
         return self.capture_screen_via_device_file(destination, last_error=last_error)
 
     def capture_screen_via_device_file(self, destination: str | Path, last_error: str | None = None) -> Path:
