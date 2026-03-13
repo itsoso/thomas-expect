@@ -1791,6 +1791,45 @@ def test_search_keyword_uses_activity_only_submit_without_double_activity_probe_
     assert runner.calls[10]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "keyevent", "66"]
 
 
+def test_search_keyword_can_use_home_activity_fast_path_before_initial_dump(tmp_path: Path) -> None:
+    from kuaishou_navigator import KuaishouNavigator
+
+    installer = FakeInstaller()
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(stdout=HOME_ACTIVITY_OUTPUT),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout="UI hierchary dumped to: /sdcard/kuaishou_nav.xml\n"),
+            FakeCompletedProcess(stdout=SEARCH_PAGE_XML),
+            FakeCompletedProcess(stdout=NO_ADB_KEYBOARD_LIST_OUTPUT),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=b"PNGDATA"),
+        ]
+    )
+
+    navigator = KuaishouNavigator(
+        serial="deec9116",
+        installer=installer,
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    written = navigator.search_keyword(
+        keyword="直播带货",
+        pinyin="zhibodaihuo",
+        destination=tmp_path / "result.png",
+        prefer_activity_fast_path=True,
+    )
+
+    assert written == tmp_path / "result.png"
+    assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "shell", "dumpsys", "activity", "activities"]
+    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1186", "223"]
+    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "shell", "uiautomator", "dump", "/sdcard/kuaishou_nav.xml"]
+
+
 def test_open_live_results_taps_live_tab_and_captures_screen(tmp_path: Path) -> None:
     from kuaishou_navigator import KuaishouNavigator
 
@@ -1865,6 +1904,7 @@ def test_search_and_enter_first_live_room_runs_full_public_live_flow(tmp_path: P
             *,
             capture: bool = True,
             verify_input_after_adb_keyboard: bool = True,
+            prefer_activity_fast_path: bool = False,
         ) -> Path:
             self.actions.append(("search", keyword, pinyin, str(destination), capture))
             target = Path(destination)

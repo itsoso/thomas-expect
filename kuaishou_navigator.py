@@ -579,24 +579,48 @@ class KuaishouNavigator:
         self._trace_ui_state("after_tap_result_query", recovered_ui)
         return recovered_ui
 
-    def ensure_search_page_ui(self) -> str:
+    def ensure_search_page_ui(self, *, prefer_activity_fast_path: bool = False) -> str:
         self.installer.ensure_app(KNOWN_APPS["kuaishou"], launch_after_install=True)
         self.sleeper(2)
-        try:
-            ui_xml = self.dump_ui_xml()
-        except KuaishouNavigationError as exc:
-            self._trace("ensure_search_page.initial_dump_failed", error=str(exc))
-            activity = self.current_activity()
-            self._trace("ensure_search_page.activity_after_initial_dump_failed", activity=activity)
-            if activity == KUAISHOU_HOME_ACTIVITY:
-                self._trace("ensure_search_page.tap_home_search_without_ui_dump", center=KUAISHOU_SEARCH_TAP)
-                self.tap(*KUAISHOU_SEARCH_TAP)
-                self.sleeper(2)
+        ui_xml: str | None = None
+        if prefer_activity_fast_path:
+            try:
+                activity = self.current_activity()
+                self._trace("ensure_search_page.activity_fast_path", activity=activity)
+                if activity == KUAISHOU_HOME_ACTIVITY:
+                    self._trace("ensure_search_page.tap_home_search_via_activity_fast_path", center=KUAISHOU_SEARCH_TAP)
+                    self.tap(*KUAISHOU_SEARCH_TAP)
+                    self.sleeper(2)
+                    ui_xml = self.dump_ui_xml()
+                    self._trace_ui_state("after_activity_fast_path_home_tap", ui_xml)
+                elif activity == KUAISHOU_SEARCH_ACTIVITY:
+                    try:
+                        ui_xml = self.dump_ui_xml()
+                    except KuaishouNavigationError as exc:
+                        self._trace("ensure_search_page.activity_fast_path_search_dump_failed", error=str(exc))
+                        raise KuaishouSearchActivityReadyError("SearchActivity ready from activity fast path")
+                    self._trace_ui_state("after_activity_fast_path_search_dump", ui_xml)
+            except KuaishouSearchActivityReadyError:
+                raise
+            except KuaishouNavigationError as exc:
+                self._trace("ensure_search_page.activity_fast_path_failed", error=str(exc))
+
+        if ui_xml is None:
+            try:
                 ui_xml = self.dump_ui_xml()
-                self._trace_ui_state("after_tap_home_search_without_ui_dump", ui_xml)
-                if self._can_submit_search_from_ui(ui_xml):
-                    return ui_xml
-            raise
+            except KuaishouNavigationError as exc:
+                self._trace("ensure_search_page.initial_dump_failed", error=str(exc))
+                activity = self.current_activity()
+                self._trace("ensure_search_page.activity_after_initial_dump_failed", activity=activity)
+                if activity == KUAISHOU_HOME_ACTIVITY:
+                    self._trace("ensure_search_page.tap_home_search_without_ui_dump", center=KUAISHOU_SEARCH_TAP)
+                    self.tap(*KUAISHOU_SEARCH_TAP)
+                    self.sleeper(2)
+                    ui_xml = self.dump_ui_xml()
+                    self._trace_ui_state("after_tap_home_search_without_ui_dump", ui_xml)
+                    if self._can_submit_search_from_ui(ui_xml):
+                        return ui_xml
+                raise
         self._trace_ui_state("launch", ui_xml)
         if self._can_submit_search_from_ui(ui_xml):
             return ui_xml
@@ -805,10 +829,11 @@ class KuaishouNavigator:
         *,
         capture: bool = True,
         verify_input_after_adb_keyboard: bool = True,
+        prefer_activity_fast_path: bool = False,
     ) -> Path:
         self._trace("search_keyword.start", keyword=keyword, pinyin=pinyin, destination=destination)
         try:
-            ui_xml = self.ensure_search_page_ui()
+            ui_xml = self.ensure_search_page_ui(prefer_activity_fast_path=prefer_activity_fast_path)
             return self._submit_search_on_search_page(
                 ui_xml,
                 keyword=keyword,
@@ -874,6 +899,7 @@ class KuaishouNavigator:
             destination=destination,
             capture=False,
             verify_input_after_adb_keyboard=False,
+            prefer_activity_fast_path=True,
         )
         self.open_live_results(destination, capture=False)
         return self.enter_first_live_room(destination, capture=True)
