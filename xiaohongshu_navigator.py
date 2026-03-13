@@ -4,8 +4,8 @@ import argparse
 import base64
 import json
 from pathlib import Path
-import subprocess
 import time
+import subprocess
 from typing import Callable
 
 from mobile_app_installer import AndroidAppInstaller, KNOWN_APPS
@@ -24,10 +24,10 @@ XHS_CAPTURE_PATH = "/sdcard/xhs_nav.png"
 ADB_KEYBOARD_IME = "com.android.adbkeyboard/.AdbIME"
 ADB_KEYBOARD_B64_ACTION = "ADB_INPUT_B64"
 DELETE_TEXT_BATCH_SIZE = 12
-XHS_LAUNCH_SETTLE_SECONDS = 1.0
-XHS_DISCOVERY_TAP_SETTLE_SECONDS = 1.0
-XHS_PRIVACY_TAP_SETTLE_SECONDS = 0.5
-XHS_SEARCH_ICON_SETTLE_SECONDS = 1.0
+XHS_LAUNCH_SETTLE_SECONDS = 0.5
+XHS_DISCOVERY_TAP_SETTLE_SECONDS = 0.5
+XHS_PRIVACY_TAP_SETTLE_SECONDS = 0.2
+XHS_SEARCH_ICON_SETTLE_SECONDS = 0.5
 TRANSIENT_ADB_ERRORS = (
     "daemon not running",
     "cannot connect to daemon",
@@ -99,7 +99,7 @@ class XiaohongshuNavigator:
         *args: str,
         text: bool = True,
         retries: int = 2,
-        retry_delay_seconds: float = 1.0,
+        retry_delay_seconds: float = 0.0,
     ) -> subprocess.CompletedProcess:
         last_result: subprocess.CompletedProcess | None = None
         for attempt in range(retries + 1):

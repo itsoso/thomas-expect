@@ -546,6 +546,66 @@ def test_capture_screen_accepts_valid_png_when_adb_returns_negative_15(tmp_path:
     ]
 
 
+def test_force_stop_app_retries_immediately_after_wait_for_device() -> None:
+    from xiaohongshu_navigator import XiaohongshuNavigator
+
+    sleep_calls: list[float] = []
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(returncode=-15, stderr="* daemon not running; starting now at tcp:5037\n"),
+            FakeCompletedProcess(
+                returncode=0,
+                stderr="* daemon not running; starting now at tcp:5037\n* daemon started successfully\n",
+            ),
+            FakeCompletedProcess(),
+        ]
+    )
+
+    navigator = XiaohongshuNavigator(
+        serial="deec9116",
+        installer=FakeInstaller(),
+        runner=runner,
+        sleeper=sleep_calls.append,
+    )
+
+    navigator.force_stop_app()
+
+    assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "shell", "am", "force-stop", "com.xingin.xhs"]
+    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "wait-for-device"]
+    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "shell", "am", "force-stop", "com.xingin.xhs"]
+    assert sleep_calls == [0.0]
+
+
+def test_tap_retries_immediately_after_wait_for_device() -> None:
+    from xiaohongshu_navigator import XiaohongshuNavigator
+
+    sleep_calls: list[float] = []
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(returncode=-15, stderr=""),
+            FakeCompletedProcess(
+                returncode=0,
+                stderr="* daemon not running; starting now at tcp:5037\n* daemon started successfully\n",
+            ),
+            FakeCompletedProcess(),
+        ]
+    )
+
+    navigator = XiaohongshuNavigator(
+        serial="deec9116",
+        installer=FakeInstaller(),
+        runner=runner,
+        sleeper=sleep_calls.append,
+    )
+
+    navigator.tap(1180, 210)
+
+    assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1180", "210"]
+    assert runner.calls[1]["cmd"] == ["adb", "-s", "deec9116", "wait-for-device"]
+    assert runner.calls[2]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1180", "210"]
+    assert sleep_calls == [0.0]
+
+
 def test_enter_first_search_note_taps_first_result_card_and_captures_screen(tmp_path: Path) -> None:
     from xiaohongshu_navigator import XiaohongshuNavigator
 
