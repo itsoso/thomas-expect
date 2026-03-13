@@ -1696,22 +1696,29 @@ def test_search_and_enter_first_live_room_runs_full_public_live_flow(tmp_path: P
     class FlowNavigator(KuaishouNavigator):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
-            self.actions: list[tuple[str, str, str, str]] = []
+            self.actions: list[tuple[str, str, str, str, bool]] = []
 
-        def search_keyword(self, keyword: str, pinyin: str, destination: str | Path) -> Path:
-            self.actions.append(("search", keyword, pinyin, str(destination)))
+        def search_keyword(
+            self,
+            keyword: str,
+            pinyin: str,
+            destination: str | Path,
+            *,
+            capture: bool = True,
+        ) -> Path:
+            self.actions.append(("search", keyword, pinyin, str(destination), capture))
             target = Path(destination)
             target.write_bytes(b"SEARCH")
             return target
 
-        def open_live_results(self, destination: str | Path) -> Path:
-            self.actions.append(("live-results", "", "", str(destination)))
+        def open_live_results(self, destination: str | Path, *, capture: bool = True) -> Path:
+            self.actions.append(("live-results", "", "", str(destination), capture))
             target = Path(destination)
             target.write_bytes(b"LIVE")
             return target
 
-        def enter_first_live_room(self, destination: str | Path) -> Path:
-            self.actions.append(("enter-live-room", "", "", str(destination)))
+        def enter_first_live_room(self, destination: str | Path, *, capture: bool = True) -> Path:
+            self.actions.append(("enter-live-room", "", "", str(destination), capture))
             target = Path(destination)
             target.write_bytes(b"ROOM")
             return target
@@ -1733,7 +1740,7 @@ def test_search_and_enter_first_live_room_runs_full_public_live_flow(tmp_path: P
     assert written == target
     assert target.read_bytes() == b"ROOM"
     assert navigator.actions == [
-        ("search", "美女直播", "meinvzhibo", str(target)),
-        ("live-results", "", "", str(target)),
-        ("enter-live-room", "", "", str(target)),
+        ("search", "美女直播", "meinvzhibo", str(target), False),
+        ("live-results", "", "", str(target), False),
+        ("enter-live-room", "", "", str(target), True),
     ]

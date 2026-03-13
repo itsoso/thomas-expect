@@ -676,6 +676,8 @@ class KuaishouNavigator:
         keyword: str,
         pinyin: str,
         destination: str | Path,
+        *,
+        capture: bool = True,
     ) -> Path:
         _ = keyword  # Reserved for future result-page assertions.
         clear_node = self.maybe_find_node(ui_xml, KUAISHOU_CLEAR_ID)
@@ -726,6 +728,8 @@ class KuaishouNavigator:
         self.sleeper(0.5)
         self.tap(*search_button.center)
         self.sleeper(2)
+        if not capture:
+            return Path(destination)
         return self.capture_screen(destination)
 
     def _submit_search_on_search_activity_without_ui(
@@ -733,6 +737,8 @@ class KuaishouNavigator:
         keyword: str,
         pinyin: str,
         destination: str | Path,
+        *,
+        capture: bool = True,
     ) -> Path:
         self._trace(
             "search_keyword.activity_only_submit",
@@ -744,6 +750,8 @@ class KuaishouNavigator:
         self.sleeper(0.5)
         self.keyevent(66)
         self.sleeper(2)
+        if not capture:
+            return Path(destination)
         return self.capture_screen(destination)
 
     def search_keyword_on_search_page(
@@ -751,22 +759,38 @@ class KuaishouNavigator:
         keyword: str,
         pinyin: str,
         destination: str | Path,
+        *,
+        capture: bool = True,
     ) -> Path:
         self.installer.ensure_app(KNOWN_APPS["kuaishou"], launch_after_install=True)
         self.sleeper(2)
         ui_xml = self.dump_ui_xml()
-        return self._submit_search_on_search_page(ui_xml, keyword=keyword, pinyin=pinyin, destination=destination)
+        return self._submit_search_on_search_page(
+            ui_xml,
+            keyword=keyword,
+            pinyin=pinyin,
+            destination=destination,
+            capture=capture,
+        )
 
     def search_keyword(
         self,
         keyword: str,
         pinyin: str,
         destination: str | Path,
+        *,
+        capture: bool = True,
     ) -> Path:
         self._trace("search_keyword.start", keyword=keyword, pinyin=pinyin, destination=destination)
         try:
             ui_xml = self.ensure_search_page_ui()
-            return self._submit_search_on_search_page(ui_xml, keyword=keyword, pinyin=pinyin, destination=destination)
+            return self._submit_search_on_search_page(
+                ui_xml,
+                keyword=keyword,
+                pinyin=pinyin,
+                destination=destination,
+                capture=capture,
+            )
         except KuaishouNavigationError as exc:
             self._trace("search_keyword.error", error=str(exc))
             try:
@@ -779,17 +803,20 @@ class KuaishouNavigator:
                     keyword=keyword,
                     pinyin=pinyin,
                     destination=destination,
+                    capture=capture,
                 )
             raise
 
-    def open_live_results(self, destination: str | Path) -> Path:
+    def open_live_results(self, destination: str | Path, *, capture: bool = True) -> Path:
         self._trace("open_live_results_start", destination=destination)
         self.tap(*KUAISHOU_LIVE_TAB_TAP)
         self.sleeper(2)
         self._trace("open_live_results_complete", destination=destination)
+        if not capture:
+            return Path(destination)
         return self.capture_screen(destination)
 
-    def enter_first_live_room(self, destination: str | Path) -> Path:
+    def enter_first_live_room(self, destination: str | Path, *, capture: bool = True) -> Path:
         self._trace("enter_first_live_room_start", destination=destination)
         self.tap(*KUAISHOU_FIRST_LIVE_RESULT_TAP)
         self.sleeper(3)
@@ -797,6 +824,8 @@ class KuaishouNavigator:
         self.tap(*KUAISHOU_LIVE_ENTRY_POPUP_CLOSE_TAP)
         self.sleeper(1)
         self._trace("enter_first_live_room_complete", destination=destination)
+        if not capture:
+            return Path(destination)
         return self.capture_screen(destination)
 
     def search_and_enter_first_live_room(
@@ -805,9 +834,9 @@ class KuaishouNavigator:
         pinyin: str,
         destination: str | Path,
     ) -> Path:
-        self.search_keyword(keyword=keyword, pinyin=pinyin, destination=destination)
-        self.open_live_results(destination)
-        return self.enter_first_live_room(destination)
+        self.search_keyword(keyword=keyword, pinyin=pinyin, destination=destination, capture=False)
+        self.open_live_results(destination, capture=False)
+        return self.enter_first_live_room(destination, capture=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
