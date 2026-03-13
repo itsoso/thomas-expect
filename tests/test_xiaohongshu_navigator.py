@@ -32,7 +32,7 @@ def test_open_search_launches_xiaohongshu_and_captures_search_page(tmp_path: Pat
 
     assert written == target
     assert target.read_bytes() == b"\x89PNGDATA"
-    assert installer.calls == [("com.xingin.xhs", False)]
+    assert installer.calls == []
     assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "shell", "am", "force-stop", "com.xingin.xhs"]
     assert runner.calls[1]["cmd"] == [
         "adb",
@@ -50,6 +50,61 @@ def test_open_search_launches_xiaohongshu_and_captures_search_page(tmp_path: Pat
     assert runner.calls[3]["cmd"] == ["adb", "-s", "deec9116", "shell", "input", "tap", "1180", "210"]
     assert runner.calls[4]["cmd"] == ["adb", "-s", "deec9116", "exec-out", "screencap", "-p"]
     assert runner.calls[4]["text"] is False
+
+
+def test_open_search_falls_back_to_install_check_when_launch_fails(tmp_path: Path) -> None:
+    from xiaohongshu_navigator import XiaohongshuNavigator
+
+    installer = FakeInstaller()
+    runner = RecordingRunner(
+        [
+            FakeCompletedProcess(),
+            FakeCompletedProcess(returncode=1, stderr="launch failed"),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(),
+            FakeCompletedProcess(stdout=b"\x89PNGDATA"),
+        ]
+    )
+
+    navigator = XiaohongshuNavigator(
+        serial="deec9116",
+        installer=installer,
+        runner=runner,
+        sleeper=lambda _seconds: None,
+    )
+
+    target = tmp_path / "xhs-search-fallback.png"
+    written = navigator.open_search(target)
+
+    assert written == target
+    assert target.read_bytes() == b"\x89PNGDATA"
+    assert installer.calls == [("com.xingin.xhs", False)]
+    assert runner.calls[0]["cmd"] == ["adb", "-s", "deec9116", "shell", "am", "force-stop", "com.xingin.xhs"]
+    assert runner.calls[1]["cmd"] == [
+        "adb",
+        "-s",
+        "deec9116",
+        "shell",
+        "monkey",
+        "-p",
+        "com.xingin.xhs",
+        "-c",
+        "android.intent.category.LAUNCHER",
+        "1",
+    ]
+    assert runner.calls[2]["cmd"] == [
+        "adb",
+        "-s",
+        "deec9116",
+        "shell",
+        "monkey",
+        "-p",
+        "com.xingin.xhs",
+        "-c",
+        "android.intent.category.LAUNCHER",
+        "1",
+    ]
 
 
 def test_open_search_writes_trace_file_when_trace_dir_is_provided(tmp_path: Path) -> None:
@@ -120,7 +175,7 @@ def test_open_discovery_launches_xiaohongshu_accepts_privacy_and_captures_screen
 
     assert written == target
     assert target.read_bytes() == b"\x89PNGDATA"
-    assert installer.calls == [("com.xingin.xhs", False)]
+    assert installer.calls == []
     assert runner.calls[0]["cmd"] == [
         "adb",
         "-s",

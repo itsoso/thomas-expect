@@ -256,6 +256,15 @@ class XiaohongshuNavigator:
                 self._decode_output(result.stderr) or f"Failed to launch {KNOWN_APPS['xiaohongshu'].package_name}"
             )
 
+    def launch_app_with_install_fallback(self) -> None:
+        try:
+            self.launch_app()
+            return
+        except XiaohongshuNavigationError as exc:
+            self._trace("launch_app_fallback_to_install", error=str(exc))
+        self.installer.ensure_app(KNOWN_APPS["xiaohongshu"], launch_after_install=False)
+        self.launch_app()
+
     def capture_screen(self, destination: str | Path) -> Path:
         target = Path(destination)
         last_error = "Xiaohongshu screenshot payload is not a PNG"
@@ -323,9 +332,8 @@ class XiaohongshuNavigator:
 
     def open_discovery(self, destination: str | Path) -> Path:
         self._trace("open_discovery_start", destination=str(destination))
-        self.installer.ensure_app(KNOWN_APPS["xiaohongshu"], launch_after_install=False)
         self._trace("open_discovery_launch_start")
-        self.launch_app()
+        self.launch_app_with_install_fallback()
         self.sleeper(2)
         self._trace("open_discovery_launch_complete")
         self._trace("open_discovery_privacy_tap_start")
@@ -340,12 +348,11 @@ class XiaohongshuNavigator:
 
     def open_search(self, destination: str | Path) -> Path:
         self._trace("open_search_start", destination=str(destination))
-        self.installer.ensure_app(KNOWN_APPS["xiaohongshu"], launch_after_install=False)
         self._trace("open_search_force_stop_start")
         self.force_stop_app()
         self._trace("open_search_force_stop_complete")
         self._trace("open_search_launch_start")
-        self.launch_app()
+        self.launch_app_with_install_fallback()
         self.sleeper(2)
         self._trace("open_search_launch_complete")
         self._trace("open_search_privacy_tap_start")
